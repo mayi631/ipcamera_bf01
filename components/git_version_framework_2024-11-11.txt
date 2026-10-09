@@ -1,0 +1,66 @@
+project_name: recorder
+commit_id: 8f3fcbdee5603b73dea8443c148af0bda5bf9149 [feat]Add new debug log define.
+
+project_name: exif
+commit_id: 3b4ba16df66d0be2129aa22716427169b0aecb57 [feat]Add new debug log define.
+
+project_name: player
+commit_id: 43b8151fc39198fc87b761af1f283ceab8f48186 [fix]:There is a syntax issue that prevents inheritance of class members
+
+project_name: ringbuffer
+commit_id: 69f87bb19e2eba0269de83b389babff5fcd00948 [feat]Add new debug log define.
+
+project_name: cvi_flash_tool
+commit_id: cc59899d723dde1006c648c7fa62e32cdc76bfb4 [fix]fix datatype build error.
+
+project_name: cvi_rtsp
+commit_id: 5c156cfa932f061374c1935a0dca29a56eeb59a4 [fix] Fixed an exception when rtsp pulls h265 traffic in TCP mode.
+
+project_name: mapi
+commit_id: 060027b65e4f06e1489f5e311bafbaa72ca59c43 [fix]fix datatype build error.
+
+project_name: cvi_sysutils
+commit_id: c88262c9056ae26016ea0b5f8f6129b62d61d48e [feat]Add new debug log define.
+
+project_name: file_recover
+commit_id: 7a9022b1210d39ee603038228a6e6e1518284f91 fix daily build error.
+
+project_name: dtcf
+commit_id: 0d8b01eec69e341bb7bf6cdb78fc917defdd37e3 [feat]Add new debug log define.
+
+project_name: cvi_osal
+commit_id: accc29b689fe114b1eae36b9a8d1d5883a86ec0f fix build error.
+
+project_name: oss
+commit_id: 615f070b69ef88a9dc755167b0e6135d7872f805 [fix]refine gcc toolchain type judge.
+
+project_name: ffmpeg
+commit_id: 87752578fa89fd70a3ca5d67f27efc1689f9e034 [feat] sync from cardv projec.
+
+project_name: demuxer
+commit_id: 6308f23befb583b876e0584b37592b426b92039f [feat]Add new debug log define.
+
+project_name: upgrade
+commit_id: 8c6296566c54cd52b500eb79709ef8ba011e7c36 [fix]:Using the content in cvi_flash tool
+
+project_name: thumbnail_extractor
+commit_id: 2b7e5245704d99a21200110a89563356a0f4d18c Internally use header files to sink to the src/inc directory
+
+project_name: cvi_mem_manage
+commit_id: 3cc70c136f8cf5c344d00d0c2f9e597168b9cc7e [feat]Add new debug log define.
+
+project_name: muxer
+commit_id: 4bccf19f3f2209477a928dac6652215f01bfbe9b [feat]Add new debug log define.
+
+project_name: perf
+commit_id: 4a093133183f460a99167ec1ce47124bdf69dd73 [feat]Add new debug log define.
+
+project_name: storage
+commit_id: b94d33c14d4464bdfcfac1277a4c64f38a3aa77d [feat]Add new debug log define.
+
+project_name: cvi_hal
+commit_id: c0e3a1c568dc6e1ae49b342f427c35bd546a4a2b [fix]:The compilation macro specified in cvi_fine. h is 181x
+
+project_name: common
+commit_id: f74940dce5d9a6a31213267154537a672e9ffc2d [feat]Refine CVI_U64/CVI_S64 typedef.
+

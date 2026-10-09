@@ -1,0 +1,254 @@
+menu "resource options"
+
+config RESOURCE_INSTALL_BITMAP
+	bool "install tiger.bmp"
+	default n
+	help
+		"support install tiger.bmp"
+
+config RESOURCE_INSTALL_VDEC_FILES
+	bool "install 640x360.jpg"
+	default n
+	help
+		"support install 640x360.jpg"
+
+menu "ai models resource"
+
+menu "CV180X"
+
+config RESOURCE_INSTALL_AI_CV180X_MOBILEDETV2_PEDESTRIAN_D0_LS_384
+	bool "install mobiledetv2-pedestrian-d0-ls-384"
+	default n
+	help
+		"support install 180x mobiledetv2-pedestrian-d0-ls-384"
+
+config RESOURCE_INSTALL_AI_CV180X_MOBILEDETV2_PEDESTRIAN_D0_LS_448
+	bool "install mobiledetv2-pedestrian-d0-ls-448"
+	default n
+	help
+		"support install 180x mobiledetv2-pedestrian-d0-ls-448"
+
+endmenu
+
+menu "CV181X"
+
+config RESOURCE_INSTALL_AI_CV181X_CVIFACE_V5
+	bool "install cviface-v5-s"
+	default n
+	help
+		"support install 181x cviface-v5-s"
+
+config RESOURCE_INSTALL_AI_CV181X_HAND_DET_QAT_640X360
+	bool "install hand_det_qat_640x384"
+	default n
+	help
+		"support install 181x hand_det_qat_640x384"
+
+config RESOURCE_INSTALL_AI_CV181X_HAND_KPT_128X128
+	bool "install hand_kpt_128x128"
+	default n
+	help
+		"support install 181x hand_kpt_128x128"
+
+config RESOURCE_INSTALL_AI_CV181X_HAND_KPT_CLS9
+	bool "install hand_kpt_cls9"
+	default n
+	help
+		"support install 181x hand_kpt_cls9"
+
+config RESOURCE_INSTALL_AI_CV181X_HARDHAT_720_1280
+	bool "install hardhat_720_1280"
+	default n
+	help
+		"support install 181x hardhat_720_1280"
+
+config RESOURCE_INSTALL_AI_CV181X_IR_RECOGITION
+	bool "install ir_recogition"
+	default n
+	help
+		"support install 181x ir_recogition"
+
+config RESOURCE_INSTALL_AI_CV181X_LIVENESS
+	bool "install liveness"
+	default n
+	help
+		"support install 181x liveness"
+
+config RESOURCE_INSTALL_AI_CV181X_MOBILEDETV2_PEDESTRIAN_D0_LS_384
+	bool "install mobiledetv2-pedestrian-d0-ls-384"
+	default n
+	help
+		"support install 181x mobiledetv2-pedestrian-d0-ls-384"
+
+config RESOURCE_INSTALL_AI_CV181X_MOBILEDETV2_PEDESTRIAN_D0_LS_448
+	bool "install mobiledetv2-pedestrian-d0-ls-448"
+	default n
+	help
+		"support install 181x mobiledetv2-pedestrian-d0-ls-448"
+
+config RESOURCE_INSTALL_AI_CV181X_MOBILEDETV2_PEDESTRIAN_D1_LS
+	bool "install mobiledetv2-pedestrian-d1-ls"
+	default n
+	help
+		"support install 181x mobiledetv2-pedestrian-d1-ls"
+
+config RESOURCE_INSTALL_AI_CV181X_PIPNET_MBV3_64_V5_2
+	bool "install pipnet_mbv3_64_v5_cv181x_2"
+	default n
+	help
+		"support install 181x pipnet_mbv3_64_v5_cv181x_2"
+
+config RESOURCE_INSTALL_AI_CV181X_RETINAFACE_MASK
+	bool "install retinaface_mask"
+	default n
+	help
+		"support install 181x retinaface_mask"
+
+config RESOURCE_INSTALL_AI_CV181X_SCRFD_320X256
+	bool "install scrfd_320_256"
+	default n
+	help
+		"support install 181x scrfd_320_256"
+
+config RESOURCE_INSTALL_AI_CV181X_SCRFD_500M_BNKPS_432X768
+	bool "install scrfd_500m_bnkps_432_768"
+	default n
+	help
+		"support install 181x scrfd_500m_bnkps_432_768"
+
+config RESOURCE_INSTALL_AI_CV181X_SOUND_IPC_SR8K_V14
+	bool "install sound_ipc_sr8k_v14_cv181x"
+	default n
+	help
+		"support install 181x sound_ipc_sr8k_v14_cv181x"
+
+config RESOURCE_INSTALL_AI_CV181X_SOUND_IPC_SR8K_V17
+	bool "install sound_ipc_sr8k_v17_cv181x"
+	default n
+	help
+		"support install 181x sound_ipc_sr8k_v17_cv181x"
+
+config RESOURCE_INSTALL_AI_CV181X_YOLOV8N_HEADPERSON_KPT
+	bool "install yolov8n_headperson_kpt_cv181x"
+	default n
+	help
+		"support install 181x yolov8n_headperson_kpt_cv181x"
+
+endmenu
+
+endmenu
+
+menu "file recover"
+
+config RESOURCE_INSTALL_H264_PCM_TEMPLATE
+	bool "install h264 pcm template"
+	default n
+	help
+		"support install record h264 & pcm fix file"
+
+config RESOURCE_INSTALL_H265_PCM_TEMPLATE
+	bool "install h265 pcm template"
+	default n
+	help
+		"support install record h265 & pcm fix file"
+
+config RESOURCE_INSTALL_MP4_AAC_TEMPLATE
+	bool "install mp4 aac template"
+	default n
+	help
+		"support install record mp4 & aac fix file"
+
+endmenu
+
+config RESOURCE_INSTALL_NETWORK_WWW
+	bool "install www"
+	default n
+	help
+		"support install www for websock"
+
+menu "param resource"
+
+menu "fbm"
+
+config RESOURCE_INSTALL_FBM_CV180ZB_WEVB_GC2053_AI
+	bool "install fbm cv180zb_wevb_gc2053_ai"
+	default n
+	help
+		"support install cv180zb_wevb_gc2053_ai.ini"
+
+config RESOURCE_INSTALL_FBM_CV1811C_CV2003_CV2003_CV2003
+	bool "install fbm cv1811c_wevb_cv2003_cv2003_cv2003"
+	default n
+	help
+		"support install fbm cv1811c_wevb_cv2003_cv2003_cv2003.ini"
+
+config RESOURCE_INSTALL_FBM_CV1811C_WEVB_GC4653
+	bool "install fbm cv1811c_wevb_gc4653"
+	default n
+	help
+		"support install fbm cv1811c_wevb_gc4653.ini"
+
+config RESOURCE_INSTALL_FBM_CV1811H_WEVB_GC4653_UVC
+	bool "install fbm cv1811h_wevb_gc4653_uvc"
+	default n
+	help
+		"support install fbm cv1811h_wevb_gc4653_uvc.ini"
+
+config RESOURCE_INSTALL_FBM_CV1811H_WEVB_GC2093_GC2053_AUTOTEST
+	bool "install fbm cv1811h_wevb_gc2093_gc2053_autotest"
+	default n
+	help
+		"support install fbm cv1811h_wevb_gc2093_gc2053_autotest.ini"
+
+config RESOURCE_INSTALL_FBM_CV180ZB_WEVB_SC2336_AUTOTEST
+	bool "install fbm cv180zb_wevb_sc2336_autotest"
+	default n
+	help
+		"support install fbm cv180zb_wevb_sc2336_autotest.ini"
+
+config RESOURCE_INSTALL_FBM_CV1815JA_BF01_GC4683
+	bool "install fbm cv1815ja_bf01_gc4683"
+	default n
+	help
+		"support install fbm cv1815ja_bf01_gc4683.ini"
+
+
+endmenu
+
+menu "sbm"
+
+config RESOURCE_INSTALL_SBM_CV1812HA_WEVB_GC2053
+	bool "install sbm cv1812ha_wevb_gc2053"
+	default n
+	help
+		"support install sbm cv1812ha_wevb_gc2053.ini"
+
+config RESOURCE_INSTALL_SBM_CV1811H_WEVB_GC4653_GC4653
+	bool "install sbm cv1811h_wevb_gc4653_gc4653"
+	default n
+	help
+		"support install sbm cv1811h_wevb_gc4653_gc4653.ini"
+
+config RESOURCE_INSTALL_SBM_CV180ZB_WEVB_GC2053
+	bool "install sbm cv180zb_wevb_gc2053"
+	default n
+	help
+		"support install sbm cv180zb_wevb_gc2053.ini"
+
+config RESOURCE_INSTALL_SBM_CV180ZB_WEVB_SC2331_SC2331
+	bool "install sbm cv180zb_wevb_sc2331_sc2331"
+	default n
+	help
+		"support install sbm cv180zb_wevb_sc2331_sc2331.ini"
+
+config RESOURCE_INSTALL_SBM_CV180ZB_WEVB_CV2003_CV2003
+	bool "install sbm cv180zb_wevb_cv2003_cv2003"
+	default n
+	help
+		"support install sbm cv180zb_wevb_cv2003_cv2003.ini"
+
+endmenu
+
+endmenu
+
+endmenu
