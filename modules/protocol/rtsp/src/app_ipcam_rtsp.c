@@ -71,25 +71,24 @@ static CVI_S32 app_ipcam_RtspAttr_Init(VENC_CHN vencChn, CVI_S32 session_id
 
     pstAttr->framerate = pstVencChnCfg->u32DstFrameRate;
 
+    pstAttr->audio_en          = CVI_FALSE;
+    pstAttr->audio_codec       = CVI_RTSP_AUDIO_BUTT;
+    pstAttr->audio_sample_rate = 0;
+    pstAttr->audio_channels    = 0;
+    pstAttr->audio_pernum      = 0;
 #ifdef AUDIO_SUPPORT
-    pstAttr->audio_en = CVI_TRUE;
     APP_PARAM_AUDIO_CFG_T *pstAudioCfg = app_ipcam_Audio_Param_Get();
     if (pstAudioCfg == NULL) {
         APP_PROF_LOG_PRINT(LEVEL_ERROR, "audio config is null. \n");
         return CVI_FAILURE;
     }
     if (pstAudioCfg->bInit) {
+        pstAttr->audio_en          = CVI_TRUE;
         pstAttr->audio_codec       = CVI_RTSP_AUDIO_PCM;
         pstAttr->audio_sample_rate = pstAudioCfg->astAudioCfg.enSamplerate;
         pstAttr->audio_channels    = 1;
         pstAttr->audio_pernum      = pstAudioCfg->astAudioCfg.u32PtNumPerFrm;
     }
-#else
-    pstAttr->audio_en          = CVI_FALSE;
-    pstAttr->audio_codec       = CVI_RTSP_AUDIO_PCM;
-    pstAttr->audio_sample_rate = 8000;
-    pstAttr->audio_channels    = 1;
-    pstAttr->audio_pernum      = 320;
 #endif
 
     pstAttr->timeout = 120;
@@ -127,36 +126,45 @@ static void rtsp_service_media_task(void *arg)
     prctl(PR_SET_NAME, TaskName, 0, 0, 0);
     APP_PROF_LOG_PRINT(LEVEL_INFO, "%s running\n", TaskName);
 
-    CVI_S32 mbufId = ctx->attr.id;
+    CVI_S32 mbufId = pstRtspCtx->VencChn[ctx->attr.id];
     CVI_MBUF_HANDLE* readerId = app_ipcam_Mbuf_CreateReader(mbufId, 1);
+    if (readerId == NULL) {
+        APP_PROF_LOG_PRINT(LEVEL_ERROR, "Create RTSP reader for venc[%d] failed\n", mbufId);
+        return;
+    }
 
     CVI_MEDIA_FRAME_INFO_T stReadFrameInfo;
     memset(&stReadFrameInfo.frameParam, 0, sizeof(stReadFrameInfo.frameParam));
     stReadFrameInfo.frameBuf = malloc(CVI_MBUF_STREAM_MAX_SIZE);
     if (NULL == stReadFrameInfo.frameBuf) {
         APP_PROF_LOG_PRINT(LEVEL_ERROR, "frameBuf malloc fail\n");
+        app_ipcam_Mbuf_DestoryReader(readerId);
         return ;
     }
-
-#ifndef AUDIO_SUPPORT
-    CVI_S32 audio_null_data_len = 64;
-    CVI_U8 *audio_null_data = (CVI_U8 *)malloc(64);
-    if (audio_null_data == NULL){
-        APP_PROF_LOG_PRINT(LEVEL_ERROR, "Malloc failed. audio_null_data == NULL. \n");
-        return ;
-    }
-    memset(audio_null_data, 0, audio_null_data_len);
-#endif
 
     // Ensure that the first frame is I-frame
     ctx->i_frame_flag = 1;
+    if (ctx->attr.video_codec == CVI_RTSP_VIDEO_H264 ||
+        ctx->attr.video_codec == CVI_RTSP_VIDEO_H265) {
+        s32Ret = CVI_VENC_RequestIDR(mbufId, CVI_TRUE);
+        if (s32Ret != CVI_SUCCESS) {
+            APP_PROF_LOG_PRINT(LEVEL_WARN, "Request IDR for venc[%d] failed: %#x\n", mbufId, s32Ret);
+        }
+    }
     while(ctx->RtspThread.bRun_flag) {
         stReadFrameInfo.frameBufLen = CVI_MBUF_STREAM_MAX_SIZE;
         s32Ret = app_ipcam_Mbuf_ReadFrame(readerId, ctx->i_frame_flag
                                         , &stReadFrameInfo, 100);
-        if (s32Ret < 0) {
-            APP_PROF_LOG_PRINT(LEVEL_INFO
-                , "app_ipcam_Mbuf_ReadFrame failed. s32Ret:%d.\n", s32Ret);
+        if (s32Ret <= 0) {
+            if (s32Ret < 0) {
+                APP_PROF_LOG_PRINT(LEVEL_INFO
+                    , "app_ipcam_Mbuf_ReadFrame failed. s32Ret:%d.\n", s32Ret);
+                cvi_osal_task_sleep(10 * 1000);
+            }
+            continue;
+        }
+        if (!ctx->attr.audio_en &&
+            stReadFrameInfo.frameParam.frameType == CVI_MEDIA_AFRAME_A) {
             continue;
         }
         if ((ctx->i_frame_flag)
@@ -168,47 +176,36 @@ static void rtsp_service_media_task(void *arg)
 
         if (stReadFrameInfo.frameParam.frameLen > 0) {
             frame.data[0] = stReadFrameInfo.frameBuf;
-            frame.iskey[0] = 1;
             frame.len[0] = stReadFrameInfo.frameParam.frameLen;
-            cvi_osal_get_boot_time_us(&frame.vi_pts[0]);
+            frame.vi_pts[0] = stReadFrameInfo.frameParam.framePts;
+            if (frame.vi_pts[0] == 0) {
+                cvi_osal_get_boot_time_us(&frame.vi_pts[0]);
+            }
             // send video data
             if ((stReadFrameInfo.frameParam.frameType == CVI_MEDIA_VFRAME_P) ||
                 (stReadFrameInfo.frameParam.frameType == CVI_MEDIA_VFRAME_I)) {
                 frame.type = FRAME_TYPE_VIDEO;
+                frame.iskey[0] = (stReadFrameInfo.frameParam.frameType == CVI_MEDIA_VFRAME_I);
                 s32Ret = CVI_RTSP_SendFrame(ctx->rtsp_ser, &frame);
                 if (s32Ret != CVI_SUCCESS) {
                     APP_PROF_LOG_PRINT(LEVEL_ERROR, "CVI_RTSP_WriteFrame failed\n");
                 }
-#ifndef AUDIO_SUPPORT
-                // send audio null data
+#ifdef AUDIO_SUPPORT
+            } else if (stReadFrameInfo.frameParam.frameType == CVI_MEDIA_AFRAME_A) {
+                // send audio data
                 frame.type = FRAME_TYPE_AUDIO;
-                frame.data[0] = audio_null_data;
                 frame.iskey[0] = 1;
-                frame.len[0] = audio_null_data_len;
                 s32Ret = CVI_RTSP_SendFrame(ctx->rtsp_ser, &frame);
                 if (s32Ret != CVI_SUCCESS) {
                     APP_PROF_LOG_PRINT(LEVEL_ERROR, "CVI_RTSP_WriteFrame failed\n");
                 }
 #endif
-            } else if (stReadFrameInfo.frameParam.frameType == CVI_MEDIA_AFRAME_A) {
-                // send audio data
-                frame.type = FRAME_TYPE_AUDIO;
-                s32Ret = CVI_RTSP_SendFrame(ctx->rtsp_ser, &frame);
-                if (s32Ret != CVI_SUCCESS) {
-                    APP_PROF_LOG_PRINT(LEVEL_ERROR, "CVI_RTSP_WriteFrame failed\n");
-                }
             } else {
                 APP_PROF_LOG_PRINT(LEVEL_ERROR, "No support frameType:%d. \n"
                     , stReadFrameInfo.frameParam.frameType);
             }
         }
     }
-
-#ifndef AUDIO_SUPPORT
-    if (audio_null_data) {
-        free(audio_null_data);
-    }
-#endif
 
     if (readerId) {
         app_ipcam_Mbuf_DestoryReader(readerId);
@@ -353,16 +350,21 @@ static CVI_S32 rtsp_service_create(RTSP_SERVICE_CONTEXT_S **rtsp_ctx
     media_info.framerate = attr->framerate;
     media_info.bitrate_kbps = attr->bitrate_kbps;
     media_info.video_codec = attr->video_codec;
-    media_info.audio_codec = attr->audio_codec;
-    media_info.audio_channels = attr->audio_channels;
-    media_info.audio_pernum = attr->audio_pernum;
-    media_info.audio_sample_rate = attr->audio_sample_rate;
+    media_info.audio_codec = CVI_RTSP_AUDIO_BUTT;
+    if (attr->audio_en) {
+        media_info.audio_codec = attr->audio_codec;
+        media_info.audio_channels = attr->audio_channels;
+        media_info.audio_pernum = attr->audio_pernum;
+        media_info.audio_sample_rate = attr->audio_sample_rate;
+        media_info.audio_port = 21000;
+    }
     media_info.rtp_port = 10000;
     media_info.video_port = 20000;
-    media_info.audio_port = 21000;
     media_info.cb = rtsp_service_event_cb;
-    APP_PROF_LOG_PRINT(LEVEL_INFO, "rtsp_service init media_info %f %d %d\n"
-        , attr->framerate, attr->video_codec, attr->audio_pernum);
+    APP_PROF_LOG_PRINT(LEVEL_INFO,
+        "rtsp_service init media_info fps=%f, bitrate=%d kbps, video_codec=%d, audio_codec=%d, audio_pernum=%d\n",
+        media_info.framerate, media_info.bitrate_kbps, media_info.video_codec,
+        media_info.audio_codec, media_info.audio_pernum);
 
     CVI_RTSP_Create(&ctx->rtsp_ser, &rtsp_info, &media_info);
     if (ctx->rtsp_ser == NULL) {
@@ -410,7 +412,7 @@ static void rtsp_service_destroy(RTSP_SERVICE_CONTEXT_S *rtsp_ctx)
 CVI_S32 app_ipcam_Rtsp_Server_Create(CVI_VOID)
 {
     CVI_S32 s32Ret = 0;
-    CVI_RTSP_SER_ATTR_S stAttr[RTSP_INSTANCE_NUM];
+    CVI_RTSP_SER_ATTR_S stAttr[RTSP_INSTANCE_NUM] = {0};
     APP_PROF_LOG_PRINT(LEVEL_INFO, "app_ipcam_Rtsp_Server_Create start.\n");
 
     for (CVI_S32 i = 0; i < pstRtspCtx->session_cnt; i++) {

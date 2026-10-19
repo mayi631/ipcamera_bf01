@@ -45,9 +45,10 @@ $(ODIR)/%.$(TARGET_MACHINE).$(SOC_NICK_NAME_LOWER).o : $(SDIR)/%.c
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(CC) $(CFLAGS) -o $@ -c $<
 
-$(TARGET) : $(OBJS)
+# Build the module libraries before linking, including incremental builds.
+$(TARGET) : $(SUBDIRS) $(OBJS)
 	$(Q)mkdir -p $(dir $@)
-	$(Q)$(CXX) $(TARGETFLAGS) $^ $(LIBS) -o $@
+	$(Q)$(CXX) $(TARGETFLAGS) $(OBJS) $(LIBS) -o $@
 	$(Q)$(STRIP) $@
 
 clean:

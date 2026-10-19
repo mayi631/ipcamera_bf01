@@ -1093,12 +1093,11 @@ static void *Thread_Streaming_Proc(void *pArgs)
     if (NULL == stFrameInfo.frameBuf)
     {
         APP_PROF_LOG_PRINT(LEVEL_ERROR, "frameBuf malloc fail\n");
+        pastVencChnCfg->bStart = CVI_FALSE;
         return NULL;
     }
 
     usleep(1000);
-
-    pastVencChnCfg->bStart = CVI_TRUE;
 
     while (pastVencChnCfg->bStart) {
         VIDEO_FRAME_INFO_S stVencFrame = {0};
@@ -1107,11 +1106,19 @@ static void *Thread_Streaming_Proc(void *pArgs)
         s32Ret = CVI_VENC_QueryStatus(VencChn, &stStatus);
         if (s32Ret != CVI_SUCCESS) {
             APP_PROF_LOG_PRINT(LEVEL_ERROR, "CVI_VENC_QueryStatus, VencChn(%d) fail\n", VencChn);
+            usleep(10 * 1000);
+            continue;
         } else {
             APP_PROF_LOG_PRINT(LEVEL_DEBUG, "u32LeftStreamFrames = %d, u32CurPacks = %d\n", stStatus.u32LeftStreamFrames, stStatus.u32CurPacks);
         }
 
+        if (stStatus.u32CurPacks == 0) {
+            usleep(1000);
+            continue;
+        }
+
         VENC_STREAM_S stStream = {0};
+        stStream.u32PackCount = stStatus.u32CurPacks;
         stStream.pstPack = (VENC_PACK_S *)malloc(sizeof(VENC_PACK_S) * stStatus.u32CurPacks);
         if (stStream.pstPack == NULL) {
             APP_PROF_LOG_PRINT(LEVEL_ERROR, "streaming malloc memory failed!\n");
@@ -1200,6 +1207,7 @@ static void *Thread_Streaming_Proc(void *pArgs)
     {
         free(stFrameInfo.frameBuf);
     }
+    pastVencChnCfg->bStart = CVI_FALSE;
     return (CVI_VOID *) CVI_SUCCESS;
 
 }
@@ -1315,6 +1323,19 @@ int app_ipcam_Venc_Init(APP_VENC_CHN_E VencIdx)
             pstVencChnCfg->enType, pstVencChnCfg->SavePath);
 
         PAYLOAD_TYPE_E enCodecType = pstVencChnCfg->enType;
+        if (pModuleCfg->alios_venc_mode) {
+            VENC_CHN_ATTR_S stVencChnAttr = {0};
+            s32Ret = CVI_VENC_GetChnAttr(VencChn, &stVencChnAttr);
+            if (s32Ret != CVI_SUCCESS) {
+                APP_PROF_LOG_PRINT(LEVEL_ERROR, "Get fastboot venc[%d] attributes failed: %#x\n", VencChn, s32Ret);
+                return s32Ret;
+            }
+            pstVencChnCfg->enType = stVencChnAttr.stVencAttr.enType;
+            pstVencChnCfg->u32Width = stVencChnAttr.stVencAttr.u32PicWidth;
+            pstVencChnCfg->u32Height = stVencChnAttr.stVencAttr.u32PicHeight;
+            APP_PROF_LOG_PRINT(LEVEL_INFO, "Use fastboot venc[%d]: codec=%d, size=%ux%u\n",
+                VencChn, pstVencChnCfg->enType, pstVencChnCfg->u32Width, pstVencChnCfg->u32Height);
+        }
         if(!pModuleCfg->alios_venc_mode){
             APP_VENC_ROI_CFG_S *pstVencRoiCfg = g_pstVencCtx->astRoiCfg;
             VENC_CHN_ATTR_S stVencChnAttr, *pstVencChnAttr = &stVencChnAttr;
@@ -1457,43 +1478,38 @@ int app_ipcam_Venc_Stop(APP_VENC_CHN_E VencIdx)
 
     APP_PARAM_MODULE_CFG_S * pModuleCfg = app_ipcam_Module_Param_Get();
 
-    if(!pModuleCfg->alios_venc_mode){
-        for (VENC_CHN s32ChnIdx = 0; s32ChnIdx < g_pstVencCtx->s32VencChnCnt; s32ChnIdx++) {
-            APP_VENC_CHN_CFG_S *pstVencChnCfg = &g_pstVencCtx->astVencChnCfg[s32ChnIdx];
-            APP_PROF_LOG_PRINT(LEVEL_INFO, "app_ipcam_Venc_Stop VENC = %d %d\n", s32ChnIdx, pstVencChnCfg->VencChn);
-            if (!((VencIdx >> s32ChnIdx) & 0x01))
-                continue;
+    for (VENC_CHN s32ChnIdx = 0; s32ChnIdx < g_pstVencCtx->s32VencChnCnt; s32ChnIdx++) {
+        APP_VENC_CHN_CFG_S *pstVencChnCfg = &g_pstVencCtx->astVencChnCfg[s32ChnIdx];
+        APP_PROF_LOG_PRINT(LEVEL_INFO, "app_ipcam_Venc_Stop VENC = %d %d\n", s32ChnIdx, pstVencChnCfg->VencChn);
+        if (!((VencIdx >> s32ChnIdx) & 0x01))
+            continue;
 
-            if (!pstVencChnCfg->bStart)
-                continue;
-
-            pstVencChnCfg->bStart = CVI_FALSE;
-        }
+        pstVencChnCfg->bStart = CVI_FALSE;
     }
 
 
     for (VENC_CHN s32ChnIdx = 0; s32ChnIdx < g_pstVencCtx->s32VencChnCnt; s32ChnIdx++) {
         APP_VENC_CHN_CFG_S *pstVencChnCfg = &g_pstVencCtx->astVencChnCfg[s32ChnIdx];
         VENC_CHN VencChn = pstVencChnCfg->VencChn;
+        if (!((VencIdx >> s32ChnIdx) & 0x01))
+            continue;
+
+        /* The Linux reader must exit even when AliOS owns the encoder. */
+        if (pstVencChnCfg->enType == PT_JPEG) {
+            pthread_mutex_lock(&JpgCapMutex);
+            pthread_cond_signal(&JpgCapCond);
+            pthread_mutex_unlock(&JpgCapMutex);
+        }
+
+        if (g_Venc_pthread[VencChn] != 0) {
+            pthread_join(g_Venc_pthread[VencChn], CVI_NULL);
+            APP_PROF_LOG_PRINT(LEVEL_WARN, "Venc_%d Streaming Proc done \n", VencChn);
+            g_Venc_pthread[VencChn] = 0;
+        }
+
+        pstVencChnCfg->bFirstStreamTCost = CVI_FALSE;
+
         if(!pModuleCfg->alios_venc_mode){
-            if (!((VencIdx >> s32ChnIdx) & 0x01))
-                continue;
-
-            /* for jpg capture */
-            if (pstVencChnCfg->enType == PT_JPEG) {
-                pthread_mutex_lock(&JpgCapMutex);
-                pthread_cond_signal(&JpgCapCond);
-                pthread_mutex_unlock(&JpgCapMutex);
-            }
-
-            if (g_Venc_pthread[VencChn] != 0) {
-                pthread_join(g_Venc_pthread[VencChn], CVI_NULL);
-                APP_PROF_LOG_PRINT(LEVEL_WARN, "Venc_%d Streaming Proc done \n", VencChn);
-                g_Venc_pthread[VencChn] = 0;
-            }
-
-            pstVencChnCfg->bFirstStreamTCost = CVI_FALSE;
-
             if (pstVencChnCfg->enBindMode != VENC_BIND_DISABLE) {
                 s32Ret = CVI_SYS_UnBind(&pstVencChnCfg->astChn[0], &pstVencChnCfg->astChn[1]);
                 if (s32Ret != CVI_SUCCESS) {
@@ -1547,6 +1563,7 @@ int app_ipcam_Venc_Start(APP_VENC_CHN_E VencIdx)
         VENC_RECV_PIC_PARAM_S stRecvParam = {0};
         stRecvParam.s32RecvPicNum = -1;
 
+        /* In the dual-OS SDK this also opens the existing stream DATAFIFO. */
         APP_CHK_RET(CVI_VENC_StartRecvFrame(VencChn, &stRecvParam), "Start recv frame");
 
         APP_PARAM_MODULE_CFG_S * pModuleCfg = app_ipcam_Module_Param_Get();
@@ -1587,12 +1604,15 @@ int app_ipcam_Venc_Start(APP_VENC_CHN_E VencIdx)
         }
 
         g_Venc_pthread[VencChn] = 0;
+        pstVencChnCfg->bStart = CVI_TRUE;
         s32Ret = pthread_create(
                         &g_Venc_pthread[VencChn],
                         &pthread_attr,
                         fun_entry,
                         (CVI_VOID *)pstVencChnCfg);
+        pthread_attr_destroy(&pthread_attr);
         if (s32Ret) {
+            pstVencChnCfg->bStart = CVI_FALSE;
             APP_PROF_LOG_PRINT(LEVEL_ERROR, "[Chn %d]pthread_create failed:0x%x\n", VencChn, s32Ret);
             return CVI_FAILURE;
         }
