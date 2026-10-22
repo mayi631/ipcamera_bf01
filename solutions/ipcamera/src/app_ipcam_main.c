@@ -6,6 +6,7 @@
 #include <signal.h>
 #include "app_ipcam_paramparse.h"
 #include "cvi_mbuf.h"
+#include "app_ipcam_preview.h"
 
 /**************************************************************************
  *                              M A C R O S                               *
@@ -81,7 +82,9 @@ static void *ThreadMisc(void *arg)
 {
     while (g_bMisc) {
         #ifdef WEB_SOCKET
-        app_ipcam_WebSocket_AiFps_Send();
+        if (!app_ipcam_Preview_Enabled()) {
+            app_ipcam_WebSocket_AiFps_Send();
+        }
         #endif
         sleep(1);
     }
@@ -118,6 +121,7 @@ static int app_ipcam_MiscThread_DeInit(void)
 
 static int app_ipcam_Exit(void)
 {
+    app_ipcam_Preview_Stop();
     APP_CHK_RET(app_ipcam_MiscThread_DeInit(), "DeInit Misc Process");
 
     #ifdef RTSP_SUPPORT
@@ -137,8 +141,10 @@ static int app_ipcam_Exit(void)
     #endif
 
     #ifdef WEB_SOCKET
-    APP_CHK_RET(app_ipcam_WebSocket_DeInit(), "WebSocket DeInit");
-    APP_CHK_RET(app_ipcam_NetCtrl_DeInit(), "NetCtrl DeInit");
+    if (!app_ipcam_Preview_Enabled()) {
+        APP_CHK_RET(app_ipcam_WebSocket_DeInit(), "WebSocket DeInit");
+        APP_CHK_RET(app_ipcam_NetCtrl_DeInit(), "NetCtrl DeInit");
+    }
     #endif
 
     APP_CHK_RET(app_ipcam_Osdc_DeInit(), "OsdC DeInit");
@@ -208,9 +214,10 @@ static int app_ipcam_Init(void)
     APP_CHK_RET(app_ipcam_Osdc_Init(), "init Draw Osdc");
 
     #ifdef WEB_SOCKET
-    APP_CHK_RET(app_ipcam_NetCtrl_Init(), "Net Ctrl init");
-    
-    APP_CHK_RET(app_ipcam_WebSocket_Init(), "websocket init");
+    if (!app_ipcam_Preview_Enabled()) {
+        APP_CHK_RET(app_ipcam_NetCtrl_Init(), "Net Ctrl init");
+        APP_CHK_RET(app_ipcam_WebSocket_Init(), "websocket init");
+    }
     #endif
 
     APP_CHK_RET(app_ipcam_Venc_Init(APP_VENC_ALL), "init video encode");
@@ -262,6 +269,8 @@ int main(int argc, char *argv[])
 
     /* start video encode */
     APP_CHK_RET(app_ipcam_Venc_Start(APP_VENC_ALL), "start video processing");
+
+    APP_CHK_RET(app_ipcam_Preview_Start(), "start BF01 preview control");
 
     #ifdef VDEC_SUPPORT
     APP_CHK_RET(app_ipcam_Vdec_Start(), "Start VDEC");

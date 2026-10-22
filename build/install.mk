@@ -24,6 +24,14 @@ install:
 	@mkdir -p $(APP_INSTALL_DIR)
 	@mkdir -p $(APP_INSTALL_DIR)/rawimages
 	@cp -rf $(TARGET) $(APP_INSTALL_DIR)
+ifeq ($(CONFIG_MODULE_PREVIEW),y)
+	@install -m 755 $(TARGET_OUT_DIR)/bin/bf01_atbm_ap $(APP_INSTALL_DIR)/bf01_atbm_ap
+	@install -m 755 $(APP_RESOURCE_DIR)/preview/bf01-preview $(APP_INSTALL_DIR)/bf01-preview
+	@install -m 755 $(APP_RESOURCE_DIR)/preview/auto.sh.example $(APP_INSTALL_DIR)/auto.sh.example
+	@install -m 755 $(APP_RESOURCE_DIR)/preview/auto.sh.example $(APP_INSTALL_DIR)/auto.sh
+	@install -m 755 $(APP_RESOURCE_DIR)/preview/S99zpreview $(APP_INSTALL_DIR)/S99zpreview
+	@install -m 755 $(SRCTREE)/scripts/install-preview.sh $(APP_INSTALL_DIR)/install-preview.sh
+endif
 #BITMAP
 ifeq ($(CONFIG_RESOURCE_INSTALL_BITMAP), y)
 	@cp -f $(APP_RESOURCE_DIR)/bitmap/tiger.bmp $(APP_INSTALL_DIR)
@@ -149,7 +157,13 @@ ifeq ($(CONFIG_RESOURCE_INSTALL_SBM_CV180ZB_WEVB_CV2003_CV2003),y)
 	@cp -rf $(APP_RESOURCE_DIR)/parameter/sbm/cv180zb_wevb_cv2003_cv2003.ini $(APP_INSTALL_DIR)/param_config.ini
 	@$(call pack_param ,$(APP_RESOURCE_DIR)/parameter/sbm/cv180zb_wevb_cv2003_cv2003.ini)
 endif
+
 ifeq ($(CONFIG_RESOURCE_INSTALL_FBM_CV1815JA_BF01_GC4683),y)
 	@cp -rf $(APP_RESOURCE_DIR)/parameter/fbm/cv1815ja_bf01_gc4683.ini $(APP_INSTALL_DIR)/param_config.ini
 	@$(call pack_param ,$(APP_RESOURCE_DIR)/parameter/fbm/cv1815ja_bf01_gc4683.ini)
 endif
+
+pack_data: install
+	@bash $(SRCTREE)/build_cvitek.sh pack_data cv1815ja_bf01_spinand
+
+.PHONY: install pack_data

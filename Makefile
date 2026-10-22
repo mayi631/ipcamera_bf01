@@ -1,7 +1,7 @@
 SHELL = /bin/bash
 SRCTREE := $(CURDIR)
 TARGET_OUT_DIR := $(CURDIR)/out
-TOPTARGETS := all clean install clean_all
+TOPTARGETS := all clean install clean_all pack_data
 TOPSUBDIRS := ipcamera
 
 export SOC_SEGMENT := $(shell echo $(CHIP_SEGMENT) | tr a-z A-Z)
@@ -26,15 +26,11 @@ ifeq ($(findstring $(SOC_SEGMENT), CV180X CV181X), )
 endif
 
 TMP_STRING = $(foreach f,$(TOPSUBDIRS),$(findstring $f,$(MAKECMDGOALS)))
-PROJECT = $(strip $(TMP_STRING))
+PROJECT = $(strip $(if $(TMP_STRING),$(TMP_STRING),$(firstword $(TOPSUBDIRS))))
 export SRCTREE PROJECT TARGET_OUT_DIR
 
 $(PROJECT): .config
 	$(MAKE) -C solutions/$@ $(strip $(subst $@,,$(MAKECMDGOALS)))
-
-
-$(TOPSUBDIRS): $(PROJECT)
-
 $(TOPTARGETS): $(TOPSUBDIRS)
 
 #Use defconfig cv181x_ipcamera_defconfig or cv180x_ipcamera_defconfig
@@ -45,7 +41,7 @@ else ifeq ($(SOC_SEGMENT), CV180X)
 	$(MAKE) -f $(SRCTREE)/Kbuild cv180x_ipcamera_defconfig
 endif
 
-#.PHONY: $(TOPTARGETS) $(TOPSUBDIRS)
+.PHONY: $(TOPTARGETS) $(TOPSUBDIRS)
 all : $(SRCTREE)/.config $(SUBDIRS) $(TARGET)
 
 

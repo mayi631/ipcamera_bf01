@@ -28,6 +28,7 @@ endif
 LIBS-$(CONFIG_MODULE_MEDIA_AUDIO)                 += -lapp_media_audio
 LIBS-$(CONFIG_MODULE_NETWORK)                     += -lapp_network
 LIBS-$(CONFIG_MODULE_RTSP)                        += -lapp_rtsp
+LIBS-$(CONFIG_MODULE_PREVIEW)                     += -lapp_preview
 
 LIBS-$(CONFIG_MODULE_ADC)                         += -lapp_adc
 LIBS-$(CONFIG_MODULE_IRCUT)                       += -lapp_ircut

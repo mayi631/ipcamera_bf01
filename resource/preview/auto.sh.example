@@ -1,0 +1,9 @@
+#!/bin/sh
+
+if [ -x /mnt/data/bf01-preview ]; then
+    exec /mnt/data/bf01-preview boot
+fi
+
+if [ -x /mnt/system/bf01-preview/bf01-preview ]; then
+    exec /mnt/system/bf01-preview/bf01-preview boot
+fi

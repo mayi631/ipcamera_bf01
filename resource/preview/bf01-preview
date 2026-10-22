@@ -1,0 +1,288 @@
+#!/bin/sh
+
+umask 077
+SELF=$(readlink -f "$0") || exit 1
+BASE=$(CDPATH= cd -- "$(dirname -- "$SELF")" && pwd) || exit 1
+AP_TOOL="$BASE/bf01_atbm_ap"
+WIFI=/mnt/system/wifi/wifi.sh
+RUN=/run/bf01-preview
+CFG=/mnt/cfg/bf01-preview
+MEDIA_PID=
+AP_PID=
+RESTORE_WIFI=0
+HAVE_WIFI_LOCK=0
+
+fail()
+{
+    echo "BF01 preview: $*" >&2
+    exit 1
+}
+
+lock_wait()
+{
+    LOCK_FD=$1
+    LOCK_TIMEOUT=$2
+    LOCK_ELAPSED=0
+    while ! flock -n "$LOCK_FD"; do
+        [ "$LOCK_ELAPSED" -lt "$LOCK_TIMEOUT" ] || return 1
+        sleep 1
+        LOCK_ELAPSED=$((LOCK_ELAPSED + 1))
+    done
+}
+
+cfg_ready()
+{
+    awk '$2 == "/mnt/cfg" { found = 1 } END { exit !found }' /proc/mounts ||
+        fail '/mnt/cfg is not mounted; refusing to save on rootfs'
+    mkdir -p "$CFG" || fail 'cannot create configuration directory'
+    chmod 700 "$CFG" || fail 'cannot protect configuration directory'
+}
+
+supervisor_running()
+{
+    [ -f "$RUN/supervisor.pid" ] || return 1
+    read -r SUPERVISOR_PID < "$RUN/supervisor.pid" || return 1
+    case "$SUPERVISOR_PID" in ''|*[!0-9]*) return 1 ;; esac
+    [ -r "/proc/$SUPERVISOR_PID/cmdline" ] || return 1
+    tr '\000' '\n' < "/proc/$SUPERVISOR_PID/cmdline" | grep -Fxq "$SELF" || return 1
+    kill -0 "$SUPERVISOR_PID" 2>/dev/null
+}
+
+stop_child()
+{
+    CHILD=$1
+    [ -n "$CHILD" ] || return 0
+    kill -TERM "$CHILD" 2>/dev/null || true
+    wait "$CHILD" 2>/dev/null || true
+}
+
+cleanup_service()
+{
+    trap - EXIT INT TERM
+    rm -f "$RUN/service.ready" "$RUN/media.ready"
+    stop_child "$MEDIA_PID"
+    stop_child "$AP_PID"
+    RESTORED=1
+    if [ "$HAVE_WIFI_LOCK" -eq 1 ]; then
+        if [ -c /dev/atbm_ioctl ]; then
+            "$AP_TOOL" sta || RESTORED=0
+        fi
+        exec 9>&-
+        HAVE_WIFI_LOCK=0
+    fi
+    if [ "$RESTORE_WIFI" -eq 1 ] && [ "$RESTORED" -eq 1 ]; then
+        "$WIFI" boot || echo 'STA restore did not connect; inspect /run/atbm_wifi/wifi.log' >&2
+    fi
+    rm -f "$RUN/supervisor.pid" "$RUN/mode" "$RUN/ap.ready" "$RUN/ap.ssid"
+    [ "$RESTORED" -eq 1 ] || echo 'STA mode restore failed; inspect module log before wifi on' >&2
+}
+
+take_wifi()
+{
+    ATTEMPTS=0
+    mkdir -p /run/atbm_wifi || fail 'cannot create Wi-Fi runtime directory'
+    while [ "$ATTEMPTS" -lt 3 ]; do
+        "$WIFI" shutdown || fail 'cannot stop STA service'
+        exec 9>/run/atbm_wifi/control.lock
+        lock_wait 9 70 || fail 'Wi-Fi control is busy'
+        HAVE_WIFI_LOCK=1
+        if [ ! -f /run/atbm_wifi/watcher.ready ] &&
+            ! pidof atbm_iot_supplicant >/dev/null 2>&1; then
+            RESTORE_WIFI=1
+            return 0
+        fi
+        exec 9>&-
+        HAVE_WIFI_LOCK=0
+        ATTEMPTS=$((ATTEMPTS + 1))
+    done
+    fail 'another STA controller is still running'
+}
+
+run_service()
+{
+    MODE=$1
+    case "$MODE" in ap|sta) ;; *) fail 'mode must be ap or sta' ;; esac
+    exec 8>"$RUN/service.lock"
+    flock -n 8 || fail 'preview supervisor already running'
+    printf '%s\n' "$$" > "$RUN/supervisor.pid"
+    printf '%s\n' "$MODE" > "$RUN/mode"
+    trap cleanup_service EXIT
+    trap 'exit 0' INT TERM
+    [ -x "$WIFI" ] || fail "missing SDK Wi-Fi service: $WIFI"
+    [ -x "$BASE/ipcamera" ] && [ -r "$BASE/param_config.ini" ] ||
+        fail 'ipcamera and param_config.ini must be deployed together'
+    pidof ipcamera >/dev/null 2>&1 && fail 'another ipcamera is running; stop it first'
+    rm -f "$RUN/service.ready" "$RUN/media.ready" "$RUN/ap.ready" "$RUN/ap.ssid"
+    if [ "$MODE" = ap ]; then
+        AP_CONFIG="$CFG/ap.conf"
+        [ -r "$AP_CONFIG" ] || AP_CONFIG="$BASE/ap.conf"
+        [ -r "$AP_CONFIG" ] || fail 'configure hotspot first: bf01-preview configure-ap SSID PASSWORD [CHANNEL]'
+        "$AP_TOOL" check "$AP_CONFIG" || fail 'invalid AP configuration'
+        take_wifi
+        if [ ! -d /sys/module/cfg80211 ]; then
+            insmod /mnt/system/ko/cfg80211.ko || fail 'cannot load cfg80211'
+        fi
+        if [ ! -d /sys/module/atbm6461_wifi_sdio ]; then
+            insmod /mnt/system/ko/3rd/atbm6461_wifi_sdio.ko || fail 'cannot load ATBM driver'
+        fi
+        COUNT=0
+        while [ ! -c /dev/atbm_ioctl ] || [ ! -e /sys/class/net/wlan0 ]; do
+            [ "$COUNT" -lt 15 ] || fail 'driver did not create wlan0 and /dev/atbm_ioctl'
+            sleep 1
+            COUNT=$((COUNT + 1))
+        done
+        ifconfig wlan0 up || fail 'cannot open wlan0 before AP configuration'
+        "$AP_TOOL" run "$AP_CONFIG" 7>&- 8>&- &
+        AP_PID=$!
+        COUNT=0
+        while [ ! -f "$RUN/ap.ready" ]; do
+            kill -0 "$AP_PID" 2>/dev/null || fail 'AP controller exited; inspect service.log'
+            [ "$COUNT" -lt 30 ] || fail 'AP firmware did not report a usable IP'
+            sleep 1
+            COUNT=$((COUNT + 1))
+        done
+    else
+        "$WIFI" boot || fail 'STA startup failed; connect using wifi connect first'
+        COUNT=0
+        while [ ! -f /run/atbm_wifi/network.ready ]; do
+            [ "$COUNT" -lt 35 ] || fail 'STA has no network; configure wifi connect or use AP mode'
+            sleep 1
+            COUNT=$((COUNT + 1))
+        done
+    fi
+    export BF01_PREVIEW=1
+    export BF01_PREVIEW_SESSION=1
+    export BF01_PREVIEW_SSID_FILE="$RUN/ap.ssid"
+    export LD_LIBRARY_PATH="$BASE/lib:/lib:/usr/lib:/lib/arm-linux-gnueabihf:/lib/3rd:/mnt/system/lib:/mnt/system/usr/lib:${LD_LIBRARY_PATH-}"
+    "$BASE/ipcamera" -i "$BASE/param_config.ini" 7>&- 8>&- 9>&- &
+    MEDIA_PID=$!
+    COUNT=0
+    while [ ! -f "$RUN/media.ready" ]; do
+        kill -0 "$MEDIA_PID" 2>/dev/null || fail 'ipcamera exited; inspect service.log'
+        [ "$COUNT" -lt 25 ] || fail 'no H.264 SPS/PPS/IDR from preview channel'
+        sleep 1
+        COUNT=$((COUNT + 1))
+    done
+    : > "$RUN/service.ready"
+    echo "BF01 live preview ready ($MODE); selected stream: :8554/live1"
+    while kill -0 "$MEDIA_PID" 2>/dev/null; do
+        if [ "$MODE" = ap ]; then
+            kill -0 "$AP_PID" 2>/dev/null || fail 'AP controller stopped'
+        fi
+        sleep 1
+    done
+    fail 'ipcamera stopped'
+}
+
+start_service()
+{
+    case "${1-}" in ap|sta) ;; *) fail 'usage: bf01-preview start ap|sta' ;; esac
+    if supervisor_running; then
+        fail 'preview is already running; use stop before changing modes'
+    fi
+    rm -f "$RUN/service.ready" "$RUN/media.ready"
+    nohup sh "$SELF" _run "$1" </dev/null >"$RUN/service.log" 2>&1 7>&- &
+    NEW_PID=$!
+    COUNT=0
+    while [ ! -f "$RUN/service.ready" ]; do
+        kill -0 "$NEW_PID" 2>/dev/null || {
+            tail -30 "$RUN/service.log" >&2
+            fail 'startup failed'
+        }
+        [ "$COUNT" -lt 120 ] || {
+            kill -TERM "$NEW_PID" 2>/dev/null || true
+            fail 'startup timed out; inspect service.log and wait for cleanup'
+        }
+        sleep 1
+        COUNT=$((COUNT + 1))
+    done
+    echo "Live preview started ($1)"
+    [ ! -f "$RUN/ap.ready" ] || cat "$RUN/ap.ready"
+    echo 'Use the device wlan0 address with RTSP TCP, port 8554, path /live1'
+}
+
+usage()
+{
+    echo 'Usage: bf01-preview {start ap|sta|stop|status|configure-ap SSID PASSWORD [CHANNEL]|autostart ap|sta|off|boot}'
+}
+
+[ "$#" -gt 0 ] || { usage; exit 1; }
+mkdir -p "$RUN" || exit 1
+chmod 700 "$RUN" || exit 1
+ACTION=$1
+shift
+if [ "$ACTION" = _run ]; then
+    [ "$#" -eq 1 ] || fail 'internal argument error'
+    run_service "$1"
+    exit $?
+fi
+exec 7>"$RUN/operation.lock"
+lock_wait 7 130 || fail 'another preview operation is still running'
+case "$ACTION" in
+    start)
+        [ "$#" -eq 1 ] || fail 'usage: bf01-preview start ap|sta'
+        start_service "$1"
+        ;;
+    stop)
+        [ "$#" -eq 0 ] || fail 'stop takes no arguments'
+        if supervisor_running; then
+            kill -TERM "$SUPERVISOR_PID" || fail 'cannot stop supervisor'
+            COUNT=0
+            while kill -0 "$SUPERVISOR_PID" 2>/dev/null; do
+                [ "$COUNT" -lt 90 ] || fail 'stop still in progress; do not start another media process'
+                sleep 1
+                COUNT=$((COUNT + 1))
+            done
+        fi
+        echo 'Live preview stopped'
+        ;;
+    status)
+        [ "$#" -eq 0 ] || fail 'status takes no arguments'
+        if supervisor_running; then
+            printf 'supervisor_pid=%s\nmode=' "$SUPERVISOR_PID"
+            cat "$RUN/mode"
+            if [ -f "$RUN/service.ready" ]; then echo 'service_ready=1'; else echo 'service_ready=0'; fi
+            if [ -f "$RUN/media.ready" ]; then echo 'video_ready=1'; else echo 'video_ready=0'; fi
+            [ ! -f "$RUN/ap.ready" ] || cat "$RUN/ap.ready"
+            ifconfig wlan0
+        else
+            echo 'preview_running=0'
+        fi
+        ;;
+    configure-ap)
+        [ "$#" -ge 2 ] && [ "$#" -le 3 ] || fail 'usage: configure-ap SSID PASSWORD [CHANNEL]'
+        cfg_ready
+        TEMP=$(mktemp "$CFG/ap.XXXXXX") || fail 'cannot create private AP config'
+        trap 'rm -f "$TEMP"' EXIT
+        printf '%s\n%s\n%s\n' "$1" "$2" "${3-6}" > "$TEMP" || fail 'cannot write AP config'
+        "$AP_TOOL" check "$TEMP" || fail 'AP configuration rejected'
+        mv -f "$TEMP" "$CFG/ap.conf" || fail 'cannot save AP config'
+        trap - EXIT
+        sync
+        echo 'AP configuration saved; restart preview to apply'
+        ;;
+    autostart)
+        [ "$#" -eq 1 ] || fail 'usage: autostart ap|sta|off'
+        case "$1" in ap|sta|off) ;; *) fail 'invalid autostart mode' ;; esac
+        cfg_ready
+        TEMP=$(mktemp "$CFG/mode.XXXXXX") || fail 'cannot create mode file'
+        printf '%s\n' "$1" > "$TEMP" && mv -f "$TEMP" "$CFG/mode" || fail 'cannot save mode'
+        sync
+        echo "Autostart mode saved: $1"
+        ;;
+    boot)
+        [ "$#" -eq 0 ] || fail 'boot takes no arguments'
+        BOOT_MODE=off
+        if [ -f "$CFG/mode" ]; then
+            read -r BOOT_MODE < "$CFG/mode" || fail 'cannot read saved boot mode'
+        elif [ -f "$BASE/boot.mode" ]; then
+            read -r BOOT_MODE < "$BASE/boot.mode" || fail 'cannot read factory boot mode'
+        fi
+        case "$BOOT_MODE" in
+            off) echo 'Live preview autostart disabled' ;;
+            ap|sta) start_service "$BOOT_MODE" ;;
+            *) fail 'invalid boot mode' ;;
+        esac
+        ;;
+    *) usage; exit 1 ;;
+esac

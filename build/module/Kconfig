@@ -135,6 +135,13 @@ config MODULE_OTA
 	help 
 		enable ota in appllicant
 
+config MODULE_PREVIEW
+	bool "enable BF01 live preview control"
+	default n
+	depends on MODULE_RTSP && MODULE_CJSON
+	help
+		Enable the opt-in JL25 live preview service and ATBM AP controller.
+
 config MODULE_DISPLAY
 	bool "enable module display"
 	default n

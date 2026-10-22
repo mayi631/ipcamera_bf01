@@ -1,5 +1,7 @@
 # CV1815JA BF01 编译和运行
 
+BF01 JL25 远程网络预览的编译、固件打包和板端操作步骤见 [BF01_PREVIEW_GUIDE.md](BF01_PREVIEW_GUIDE.md)。
+
 使用 `configs/cv1815ja_bf01_defconfig`，目标程序为 `ipcamera`。
 将本仓库放在 SDK 根目录下，与 `build`、`cvi_mpi`、`host-tools` 等目录同级；SDK 的头文件和库需已编译就绪。
 
