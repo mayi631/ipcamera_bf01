@@ -7,7 +7,6 @@ AP_TOOL="$BASE/bf01_atbm_ap"
 WIFI=/mnt/system/wifi/wifi.sh
 RUN=/run/bf01-preview
 CFG=/mnt/cfg/bf01-preview
-MEDIA_PID=
 AP_PID=
 RESTORE_WIFI=0
 HAVE_WIFI_LOCK=0
@@ -40,11 +39,10 @@ cfg_ready()
 
 supervisor_running()
 {
-    [ -f "$RUN/supervisor.pid" ] || return 1
-    read -r SUPERVISOR_PID < "$RUN/supervisor.pid" || return 1
+    [ -f "$RUN/ipcamera.pid" ] || return 1
+    read -r SUPERVISOR_PID < "$RUN/ipcamera.pid" || return 1
     case "$SUPERVISOR_PID" in ''|*[!0-9]*) return 1 ;; esac
-    [ -r "/proc/$SUPERVISOR_PID/cmdline" ] || return 1
-    tr '\000' '\n' < "/proc/$SUPERVISOR_PID/cmdline" | grep -Fxq "$SELF" || return 1
+    [ "$(readlink -f "/proc/$SUPERVISOR_PID/exe")" = "$(readlink -f "$BASE/ipcamera")" ] || return 1
     kill -0 "$SUPERVISOR_PID" 2>/dev/null
 }
 
@@ -59,8 +57,7 @@ stop_child()
 cleanup_service()
 {
     trap - EXIT INT TERM
-    rm -f "$RUN/service.ready" "$RUN/media.ready"
-    stop_child "$MEDIA_PID"
+    rm -f "$RUN/network.ready"
     stop_child "$AP_PID"
     RESTORED=1
     if [ "$HAVE_WIFI_LOCK" -eq 1 ]; then
@@ -71,9 +68,9 @@ cleanup_service()
         HAVE_WIFI_LOCK=0
     fi
     if [ "$RESTORE_WIFI" -eq 1 ] && [ "$RESTORED" -eq 1 ]; then
-        "$WIFI" boot || echo 'STA restore did not connect; inspect /run/atbm_wifi/wifi.log' >&2
+        "$WIFI" boot 8>&- || echo 'STA restore did not connect; inspect /run/atbm_wifi/wifi.log' >&2
     fi
-    rm -f "$RUN/supervisor.pid" "$RUN/mode" "$RUN/ap.ready" "$RUN/ap.ssid"
+    rm -f "$RUN/mode" "$RUN/ap.ready" "$RUN/ap.ssid"
     [ "$RESTORED" -eq 1 ] || echo 'STA mode restore failed; inspect module log before wifi on' >&2
 }
 
@@ -82,7 +79,7 @@ take_wifi()
     ATTEMPTS=0
     mkdir -p /run/atbm_wifi || fail 'cannot create Wi-Fi runtime directory'
     while [ "$ATTEMPTS" -lt 3 ]; do
-        "$WIFI" shutdown || fail 'cannot stop STA service'
+        "$WIFI" shutdown 8>&- || fail 'cannot stop STA service'
         exec 9>/run/atbm_wifi/control.lock
         lock_wait 9 70 || fail 'Wi-Fi control is busy'
         HAVE_WIFI_LOCK=1
@@ -98,21 +95,21 @@ take_wifi()
     fail 'another STA controller is still running'
 }
 
-run_service()
+run_network()
 {
     MODE=$1
+    OWNER=$2
     case "$MODE" in ap|sta) ;; *) fail 'mode must be ap or sta' ;; esac
+    case "$OWNER" in ''|*[!0-9]*) fail 'invalid camera owner' ;; esac
+    [ "$PPID" = "$OWNER" ] && [ "$(readlink -f "/proc/$OWNER/exe")" = "$(readlink -f "$BASE/ipcamera")" ] ||
+        fail 'network helper must be started by ipcamera'
     exec 8>"$RUN/service.lock"
-    flock -n 8 || fail 'preview supervisor already running'
-    printf '%s\n' "$$" > "$RUN/supervisor.pid"
+    flock -n 8 || fail 'another network controller is still running'
     printf '%s\n' "$MODE" > "$RUN/mode"
     trap cleanup_service EXIT
     trap 'exit 0' INT TERM
     [ -x "$WIFI" ] || fail "missing SDK Wi-Fi service: $WIFI"
-    [ -x "$BASE/ipcamera" ] && [ -r "$BASE/param_config.ini" ] ||
-        fail 'ipcamera and param_config.ini must be deployed together'
-    pidof ipcamera >/dev/null 2>&1 && fail 'another ipcamera is running; stop it first'
-    rm -f "$RUN/service.ready" "$RUN/media.ready" "$RUN/ap.ready" "$RUN/ap.ssid"
+    rm -f "$RUN/network.ready" "$RUN/ap.ready" "$RUN/ap.ssid"
     if [ "$MODE" = ap ]; then
         AP_CONFIG="$CFG/ap.conf"
         [ -r "$AP_CONFIG" ] || AP_CONFIG="$BASE/ap.conf"
@@ -142,7 +139,7 @@ run_service()
             COUNT=$((COUNT + 1))
         done
     else
-        "$WIFI" boot || fail 'STA startup failed; connect using wifi connect first'
+        "$WIFI" boot 8>&- || fail 'STA startup failed; connect using wifi connect first'
         COUNT=0
         while [ ! -f /run/atbm_wifi/network.ready ]; do
             [ "$COUNT" -lt 35 ] || fail 'STA has no network; configure wifi connect or use AP mode'
@@ -150,38 +147,30 @@ run_service()
             COUNT=$((COUNT + 1))
         done
     fi
-    export BF01_PREVIEW=1
-    export BF01_PREVIEW_SESSION=1
-    export BF01_PREVIEW_SSID_FILE="$RUN/ap.ssid"
-    export LD_LIBRARY_PATH="$BASE/lib:/lib:/usr/lib:/lib/arm-linux-gnueabihf:/lib/3rd:/mnt/system/lib:/mnt/system/usr/lib:${LD_LIBRARY_PATH-}"
-    "$BASE/ipcamera" -i "$BASE/param_config.ini" 7>&- 8>&- 9>&- &
-    MEDIA_PID=$!
-    COUNT=0
-    while [ ! -f "$RUN/media.ready" ]; do
-        kill -0 "$MEDIA_PID" 2>/dev/null || fail 'ipcamera exited; inspect service.log'
-        [ "$COUNT" -lt 25 ] || fail 'no H.264 SPS/PPS/IDR from preview channel'
-        sleep 1
-        COUNT=$((COUNT + 1))
-    done
-    : > "$RUN/service.ready"
-    echo "BF01 live preview ready ($MODE); selected stream: :8554/live1"
-    while kill -0 "$MEDIA_PID" 2>/dev/null; do
+    : > "$RUN/network.ready"
+    echo "IPCamera network ready ($MODE)"
+    while kill -0 "$OWNER" 2>/dev/null &&
+        [ "$(readlink -f "/proc/$OWNER/exe")" = "$(readlink -f "$BASE/ipcamera")" ]; do
         if [ "$MODE" = ap ]; then
             kill -0 "$AP_PID" 2>/dev/null || fail 'AP controller stopped'
         fi
         sleep 1
     done
-    fail 'ipcamera stopped'
 }
 
 start_service()
 {
     case "${1-}" in ap|sta) ;; *) fail 'usage: bf01-preview start ap|sta' ;; esac
     if supervisor_running; then
-        fail 'preview is already running; use stop before changing modes'
+        if [ -f "$RUN/service.ready" ] && [ "$(cat "$RUN/mode" 2>/dev/null)" = "$1" ]; then
+            echo 'IPCamera is already running; no second camera is started'
+            return 0
+        fi
+        fail 'ipcamera is already running; stop it before changing network mode'
     fi
-    rm -f "$RUN/service.ready" "$RUN/media.ready"
-    nohup sh "$SELF" _run "$1" </dev/null >"$RUN/service.log" 2>&1 7>&- &
+    export BF01_WIFI_MODE=$1
+    export LD_LIBRARY_PATH="$BASE/lib:/lib:/usr/lib:/lib/arm-linux-gnueabihf:/lib/3rd:/mnt/system/lib:/mnt/system/usr/lib:${LD_LIBRARY_PATH-}"
+    nohup "$BASE/ipcamera" -i "$BASE/param_config.ini" </dev/null >"$RUN/service.log" 2>&1 7>&- &
     NEW_PID=$!
     COUNT=0
     while [ ! -f "$RUN/service.ready" ]; do
@@ -211,9 +200,9 @@ mkdir -p "$RUN" || exit 1
 chmod 700 "$RUN" || exit 1
 ACTION=$1
 shift
-if [ "$ACTION" = _run ]; then
-    [ "$#" -eq 1 ] || fail 'internal argument error'
-    run_service "$1"
+if [ "$ACTION" = _network ]; then
+    [ "$#" -eq 2 ] || fail 'internal argument error'
+    run_network "$1" "$2"
     exit $?
 fi
 exec 7>"$RUN/operation.lock"
@@ -226,7 +215,7 @@ case "$ACTION" in
     stop)
         [ "$#" -eq 0 ] || fail 'stop takes no arguments'
         if supervisor_running; then
-            kill -TERM "$SUPERVISOR_PID" || fail 'cannot stop supervisor'
+            kill -TERM "$SUPERVISOR_PID" || fail 'cannot stop ipcamera'
             COUNT=0
             while kill -0 "$SUPERVISOR_PID" 2>/dev/null; do
                 [ "$COUNT" -lt 90 ] || fail 'stop still in progress; do not start another media process'
@@ -239,7 +228,7 @@ case "$ACTION" in
     status)
         [ "$#" -eq 0 ] || fail 'status takes no arguments'
         if supervisor_running; then
-            printf 'supervisor_pid=%s\nmode=' "$SUPERVISOR_PID"
+            printf 'ipcamera_pid=%s\nmode=' "$SUPERVISOR_PID"
             cat "$RUN/mode"
             if [ -f "$RUN/service.ready" ]; then echo 'service_ready=1'; else echo 'service_ready=0'; fi
             if [ -f "$RUN/media.ready" ]; then echo 'video_ready=1'; else echo 'video_ready=0'; fi

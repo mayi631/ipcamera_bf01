@@ -6,6 +6,13 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <signal.h>
+#include <sys/file.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 #include "app_ipcam_paramparse.h"
 #include "bf01_preview.h"
 #include "cvi_mbuf.h"
@@ -16,6 +23,122 @@ static unsigned int parameter_sets;
 static time_t last_frame;
 static time_t last_keyframe;
 static int ready_written;
+static pid_t network_pid = -1;
+static int instance_fd = -1;
+
+static void preview_network_stop(void)
+{
+    if (network_pid > 0) {
+        kill(network_pid, SIGTERM);
+        while (waitpid(network_pid, NULL, 0) < 0 && errno == EINTR) { }
+        network_pid = -1;
+    }
+    if (instance_fd >= 0) {
+        unlink("/run/bf01-preview/ipcamera.pid");
+        unlink("/run/bf01-preview/service.ready");
+        unlink("/run/bf01-preview/media.ready");
+        unlink("/run/bf01-preview/mode");
+        close(instance_fd);
+        instance_fd = -1;
+    }
+}
+
+int app_ipcam_Preview_NetworkAlive(void)
+{
+    if (network_pid <= 0)
+        return network_pid == -1;
+    pid_t result = waitpid(network_pid, NULL, WNOHANG);
+    if (result == 0 || (result < 0 && errno == EINTR))
+        return 1;
+    network_pid = 0;
+    return 0;
+}
+
+int app_ipcam_Preview_Prepare(void)
+{
+    char helper[PATH_MAX];
+    char owner[32];
+    const char *mode = getenv("BF01_WIFI_MODE");
+    if (!mode)
+        mode = "ap";
+    if (strcmp(mode, "ap") && strcmp(mode, "sta") && strcmp(mode, "off")) {
+        fprintf(stderr, "ipcamera: BF01_WIFI_MODE must be ap, sta or off\n");
+        return -1;
+    }
+    if (mkdir("/run/bf01-preview", 0700) != 0 && errno != EEXIST)
+        return -1;
+    int lock_fd = open("/run/bf01-preview/ipcamera.lock", O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+    if (lock_fd < 0 || flock(lock_fd, LOCK_EX | LOCK_NB) != 0) {
+        fprintf(stderr, "ipcamera: another ipcamera is running; do not start a second camera\n");
+        if (lock_fd >= 0)
+            close(lock_fd);
+        return -1;
+    }
+    instance_fd = lock_fd;
+    if (atexit(preview_network_stop) != 0) {
+        preview_network_stop();
+        return -1;
+    }
+    FILE *pid_file = fopen("/run/bf01-preview/ipcamera.pid", "w");
+    if (!pid_file)
+        return -1;
+    int written = fprintf(pid_file, "%ld\n", (long)getpid());
+    if (fclose(pid_file) != 0 || written < 0)
+        return -1;
+    unlink("/run/bf01-preview/service.ready");
+    unlink("/run/bf01-preview/media.ready");
+    if (setenv("BF01_PREVIEW", "1", 1) != 0 ||
+        setenv("BF01_PREVIEW_SSID_FILE", "/run/bf01-preview/ap.ssid", 1) != 0)
+        return -1;
+    if (!strcmp(mode, "off")) {
+        FILE *mode_file = fopen("/run/bf01-preview/mode", "w");
+        if (!mode_file)
+            return -1;
+        int result = fprintf(mode_file, "off\n");
+        if (fclose(mode_file) != 0 || result < 0)
+            return -1;
+        return 0;
+    }
+    ssize_t length = readlink("/proc/self/exe", helper, sizeof(helper) - 1);
+    if (length <= 0 || (size_t)length >= sizeof(helper) - 1)
+        return -1;
+    helper[length] = '\0';
+    char *name = strrchr(helper, '/');
+    if (!name || (size_t)(name - helper) + sizeof("/bf01-preview") > sizeof(helper))
+        return -1;
+    strcpy(name, "/bf01-preview");
+    if (access(helper, X_OK) != 0) {
+        fprintf(stderr, "ipcamera: missing internal network helper: %s\n", helper);
+        return -1;
+    }
+    snprintf(owner, sizeof(owner), "%ld", (long)getpid());
+    unlink("/run/bf01-preview/network.ready");
+    network_pid = fork();
+    if (network_pid < 0)
+        return -1;
+    if (network_pid == 0) {
+        sigset_t signals;
+        sigemptyset(&signals);
+        sigprocmask(SIG_SETMASK, &signals, NULL);
+        execl(helper, helper, "_network", mode, owner, (char *)NULL);
+        _exit(127);
+    }
+    for (unsigned int attempt = 0; attempt < 120; attempt++) {
+        sigset_t pending;
+        if (sigpending(&pending) == 0 &&
+            (sigismember(&pending, SIGINT) || sigismember(&pending, SIGTERM)))
+            return -1;
+        if (!app_ipcam_Preview_NetworkAlive()) {
+            fprintf(stderr, "ipcamera: Wi-Fi startup failed; camera was not started\n");
+            return -1;
+        }
+        if (access("/run/bf01-preview/network.ready", F_OK) == 0)
+            return 0;
+        sleep(1);
+    }
+    fprintf(stderr, "ipcamera: Wi-Fi startup timed out\n");
+    return -1;
+}
 
 int app_ipcam_Preview_Enabled(void)
 {
@@ -69,9 +192,13 @@ static int preview_video_ready(void *opaque)
             fprintf(marker, "%ld\n", (long)getpid());
             fclose(marker);
             ready_written = 1;
+            marker = fopen("/run/bf01-preview/service.ready", "w");
+            if (marker)
+                fclose(marker);
         }
     } else if (!ready && ready_written) {
         unlink("/run/bf01-preview/media.ready");
+        unlink("/run/bf01-preview/service.ready");
         ready_written = 0;
     }
     return ready;

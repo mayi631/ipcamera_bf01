@@ -27,6 +27,7 @@ install:
 ifeq ($(CONFIG_MODULE_PREVIEW),y)
 	@install -m 755 $(TARGET_OUT_DIR)/bin/bf01_atbm_ap $(APP_INSTALL_DIR)/bf01_atbm_ap
 	@install -m 755 $(APP_RESOURCE_DIR)/preview/bf01-preview $(APP_INSTALL_DIR)/bf01-preview
+	@install -m 600 $(APP_RESOURCE_DIR)/preview/ap.conf $(APP_INSTALL_DIR)/ap.conf
 	@install -m 755 $(APP_RESOURCE_DIR)/preview/auto.sh.example $(APP_INSTALL_DIR)/auto.sh.example
 	@install -m 755 $(APP_RESOURCE_DIR)/preview/auto.sh.example $(APP_INSTALL_DIR)/auto.sh
 	@install -m 755 $(APP_RESOURCE_DIR)/preview/S99zpreview $(APP_INSTALL_DIR)/S99zpreview

@@ -25,6 +25,7 @@
 #endif
 
 #define P_MAX_SIZE (512 * 1024) //P oversize 512K lost it
+#define JPEG_STREAM_PACK_COUNT 8
 /**************************************************************************
  *                              M A C R O S                               *
  **************************************************************************/
@@ -921,16 +922,26 @@ static int _streaming_save_to_flash(APP_VENC_CHN_CFG_S *pstVencChnCfg, VENC_STRE
 
     for (CVI_U32 i = 0; i < pstStream->u32PackCount; i++) {
         ppack = &pstStream->pstPack[i];
-        fwrite(ppack->pu8Addr + ppack->u32Offset,
-                ppack->u32Len - ppack->u32Offset, 1, pstVencChnCfg->pFile);
+        size_t packSize = ppack->u32Len - ppack->u32Offset;
+        if (fwrite(ppack->pu8Addr + ppack->u32Offset, 1, packSize,
+                pstVencChnCfg->pFile) != packSize) {
+            APP_PROF_LOG_PRINT(LEVEL_ERROR, "write encoded file failed: %s\n", strerror(errno));
+            fclose(pstVencChnCfg->pFile);
+            pstVencChnCfg->pFile = NULL;
+            return CVI_FAILURE;
+        }
 
         APP_PROF_LOG_PRINT(LEVEL_DEBUG, "pack[%d], PTS = %llu, Addr = %p, Len = 0x%X, Offset = 0x%X DataType=%d\n",
                 i, ppack->u64PTS, ppack->pu8Addr, ppack->u32Len, ppack->u32Offset, ppack->DataType.enH265EType);
     }
 
     if (pstVencChnCfg->enType == PT_JPEG) {
-        fclose(pstVencChnCfg->pFile);
+        int closeResult = fclose(pstVencChnCfg->pFile);
         pstVencChnCfg->pFile = NULL;
+        if (closeResult != 0) {
+            APP_PROF_LOG_PRINT(LEVEL_ERROR, "close JPEG file failed: %s\n", strerror(errno));
+            return CVI_FAILURE;
+        }
     } else {
         if (++pstVencChnCfg->fileNum > pstVencChnCfg->u32Duration) {
             pstVencChnCfg->fileNum = 0;
@@ -944,17 +955,20 @@ static int _streaming_save_to_flash(APP_VENC_CHN_CFG_S *pstVencChnCfg, VENC_STRE
 
 void app_ipcam_JpgCapFlag_Set(CVI_BOOL bEnable)
 {
+    pthread_mutex_lock(&JpgCapMutex);
     bJpgCapFlag = bEnable;
     if (bEnable) {
-        pthread_mutex_lock(&JpgCapMutex);
         pthread_cond_signal(&JpgCapCond);
-        pthread_mutex_unlock(&JpgCapMutex);
     }
+    pthread_mutex_unlock(&JpgCapMutex);
 }
 
 CVI_BOOL app_ipcam_JpgCapFlag_Get(void)
 {
-    return bJpgCapFlag;
+    pthread_mutex_lock(&JpgCapMutex);
+    CVI_BOOL requested = bJpgCapFlag;
+    pthread_mutex_unlock(&JpgCapMutex);
+    return requested;
 }
 
 int app_ipcam_Venc_StreamStatus_Get(int enType, VENC_PACK_S *ppack, bool *is_I_frame)
@@ -1228,14 +1242,26 @@ static void *Thread_Jpg_Proc(void *pArgs)
     CVI_S32 vpssChn = pstVencChnCfg->VpssChn;
     VIDEO_FRAME_INFO_S stVencFrame = {0};
 
-    pstVencChnCfg->bStart = CVI_TRUE;
-
-    while (pstVencChnCfg->bStart) {
+    while (1) {
+        pthread_mutex_lock(&JpgCapMutex);
+        while (pstVencChnCfg->bStart && !bJpgCapFlag) {
+            pthread_cond_wait(&JpgCapCond, &JpgCapMutex);
+        }
         if (!pstVencChnCfg->bStart) {
+            pthread_mutex_unlock(&JpgCapMutex);
             break;
         }
+        bJpgCapFlag = CVI_FALSE;
+        pthread_mutex_unlock(&JpgCapMutex);
 
-        if (app_ipcam_JpgCapFlag_Get()) {
+        {
+            if (access(pstVencChnCfg->SavePath, W_OK) != 0) {
+                APP_PROF_LOG_PRINT(LEVEL_ERROR, "JPEG save directory is not writable: %s\n", pstVencChnCfg->SavePath);
+                continue;
+            }
+            if (CVI_VPSS_GetChnFrame(vpssGrp, vpssChn, &stVencFrame, 0) == CVI_SUCCESS) {
+                CVI_VPSS_ReleaseChnFrame(vpssGrp, vpssChn, &stVencFrame);
+            }
             s32Ret = CVI_VPSS_GetChnFrame(vpssGrp, vpssChn, &stVencFrame, 2000);
             if (s32Ret != CVI_SUCCESS) {
                 APP_PROF_LOG_PRINT(LEVEL_INFO, "CVI_VPSS_GetChnFrame failed! %d\n", s32Ret);
@@ -1251,47 +1277,30 @@ static void *Thread_Jpg_Proc(void *pArgs)
                 goto rls_frame;
             }
 
-            VENC_CHN_STATUS_S stStatus = {0};
-            s32Ret = CVI_VENC_QueryStatus(VencChn, &stStatus);
-            if (s32Ret != CVI_SUCCESS) {
-                APP_PROF_LOG_PRINT(LEVEL_ERROR, "CVI_VENC_QueryStatus, VencChn(%d) fail\n", VencChn);
-            } else {
-                APP_PROF_LOG_PRINT(LEVEL_DEBUG, "u32LeftStreamFrames = %d, u32CurPacks = %d\n", stStatus.u32LeftStreamFrames, stStatus.u32CurPacks);
-            }
-
-            VENC_STREAM_S stStream = {0};
-            stStream.pstPack = (VENC_PACK_S *)malloc(sizeof(VENC_PACK_S) * stStatus.u32CurPacks);
-            if (stStream.pstPack == NULL) {
-                APP_PROF_LOG_PRINT(LEVEL_ERROR, "streaming malloc memory failed!\n");
-                goto rls_frame;
-            }
+            VENC_PACK_S streamPacks[JPEG_STREAM_PACK_COUNT] = {0};
+            VENC_STREAM_S stStream = {
+                .pstPack = streamPacks,
+                .u32PackCount = JPEG_STREAM_PACK_COUNT,
+            };
 
             s32Ret = CVI_VENC_GetStream(VencChn, &stStream, 2000);
             if (s32Ret != CVI_SUCCESS) {
                 APP_PROF_LOG_PRINT(LEVEL_ERROR, "CVI_VENC_GetStream, VencChn = %d, s32Ret = 0x%X\n", VencChn, s32Ret);
-                free(stStream.pstPack);
-                stStream.pstPack = NULL;
                 goto rls_frame;
             } else {
                 CVI_VPSS_ReleaseChnFrame(vpssGrp, vpssChn, &stVencFrame);
             }
-            app_ipcam_JpgCapFlag_Set(CVI_FALSE);
-
-            /* save jpg to flash */
-            _streaming_save_to_flash(pstVencChnCfg, &stStream);
+            s32Ret = _streaming_save_to_flash(pstVencChnCfg, &stStream);
+            if (s32Ret != CVI_SUCCESS) {
+                APP_PROF_LOG_PRINT(LEVEL_ERROR, "JPEG save failed on VencChn %d\n", VencChn);
+            }
 
             CVI_VENC_ReleaseStream(VencChn, &stStream);
-            free(stStream.pstPack);
-            stStream.pstPack = NULL;
 
             continue;
 
         rls_frame:
             CVI_VPSS_ReleaseChnFrame(vpssGrp, vpssChn, &stVencFrame);
-        } else {
-            pthread_mutex_lock(&JpgCapMutex);
-            pthread_cond_wait(&JpgCapCond, &JpgCapMutex);
-            pthread_mutex_unlock(&JpgCapMutex);
         }
     }
 
@@ -1484,7 +1493,9 @@ int app_ipcam_Venc_Stop(APP_VENC_CHN_E VencIdx)
         if (!((VencIdx >> s32ChnIdx) & 0x01))
             continue;
 
+        pthread_mutex_lock(&JpgCapMutex);
         pstVencChnCfg->bStart = CVI_FALSE;
+        pthread_mutex_unlock(&JpgCapMutex);
     }
 
 

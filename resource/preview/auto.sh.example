@@ -1,9 +1,21 @@
 #!/bin/sh
 
-if [ -x /mnt/data/bf01-preview ]; then
-    exec /mnt/data/bf01-preview boot
+BASE=/mnt/data
+[ -x "$BASE/ipcamera" ] || BASE=/mnt/system/bf01-preview
+[ -x "$BASE/ipcamera" ] || exit 0
+MODE=off
+if [ -f /mnt/cfg/bf01-preview/mode ]; then
+    read -r MODE < /mnt/cfg/bf01-preview/mode || exit 1
+elif [ -f "$BASE/boot.mode" ]; then
+    read -r MODE < "$BASE/boot.mode" || exit 1
 fi
-
-if [ -x /mnt/system/bf01-preview/bf01-preview ]; then
-    exec /mnt/system/bf01-preview/bf01-preview boot
-fi
+case "$MODE" in
+    off) exit 0 ;;
+    ap|sta) ;;
+    *) echo 'IPCamera: invalid boot mode' >&2; exit 1 ;;
+esac
+mkdir -p /run/bf01-preview || exit 1
+chmod 700 /run/bf01-preview || exit 1
+export BF01_WIFI_MODE=$MODE
+export LD_LIBRARY_PATH="$BASE/lib:/lib:/usr/lib:/lib/arm-linux-gnueabihf:/lib/3rd:/mnt/system/lib:/mnt/system/usr/lib:${LD_LIBRARY_PATH-}"
+exec "$BASE/ipcamera" -i "$BASE/param_config.ini" >>/run/bf01-preview/service.log 2>&1

@@ -4,6 +4,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
+#include <errno.h>
+#include <time.h>
 #include "app_ipcam_paramparse.h"
 #include "cvi_mbuf.h"
 #include "app_ipcam_preview.h"
@@ -34,28 +36,6 @@ static CVI_BOOL g_bMisc;
  *               F U N C T I O N    D E C L A R A T I O N S               *
  **************************************************************************/
 static int app_ipcam_Exit(void);
-
-static CVI_VOID app_ipcam_ExitSig_handle(CVI_S32 signo)
-{
-    CVI_S32 s32Ret = CVI_SUCCESS;
-    signal(SIGINT, SIG_IGN);
-    signal(SIGTERM, SIG_IGN);
-    
-    if ((SIGINT == signo) || (SIGTERM == signo)) {
-        app_ipcam_Exit();
-        APP_PROF_LOG_PRINT(LEVEL_INFO, "ipcam receive a signal(%d) from terminate\n", signo);
-    }
-
-    exit(s32Ret);
-}
-
-static CVI_VOID app_ipcam_Usr1Sig_handle(CVI_S32 signo)
-{    
-    if (SIGUSR1 == signo) {
-        APP_PROF_LOG_PRINT(LEVEL_INFO, "ipcam receive a signal(%d) from terminate and start trigger a picture\n", signo);
-        app_ipcam_JpgCapFlag_Set(CVI_TRUE);
-    }
-}
 
 static int app_ipcam_Peripheral_Init(void)
 {
@@ -252,9 +232,14 @@ int main(int argc, char *argv[])
     system("echo /mnt/nfs/core-%e-%p-%t > /proc/sys/kernel/core_pattern");
     APP_CHK_RET(app_ipcam_Opts_Parse(argc, argv), "parse optinos");
 
-    signal(SIGINT, app_ipcam_ExitSig_handle);
-    signal(SIGTERM, app_ipcam_ExitSig_handle);
-    signal(SIGUSR1, app_ipcam_Usr1Sig_handle);
+    sigset_t photoSignals;
+    sigemptyset(&photoSignals);
+    sigaddset(&photoSignals, SIGUSR1);
+    sigaddset(&photoSignals, SIGINT);
+    sigaddset(&photoSignals, SIGTERM);
+    APP_CHK_RET(pthread_sigmask(SIG_BLOCK, &photoSignals, NULL), "block photo signal");
+
+    APP_CHK_RET(app_ipcam_Preview_Prepare(), "prepare integrated camera network");
 
     /* load each moudles parameter from param_config.ini */
     APP_CHK_RET(app_ipcam_Param_Load(), "load global parameter");
@@ -314,7 +299,19 @@ int main(int argc, char *argv[])
     //APP_CHK_RET(app_ipcam_CmdTask_Create(), "running cmd test");
 
     while (1) {
-        sleep(1);
+        struct timespec waitTime = { .tv_sec = 1 };
+        int receivedSignal = sigtimedwait(&photoSignals, NULL, &waitTime);
+        int signalError = errno;
+        if (receivedSignal == SIGUSR1) {
+            app_ipcam_JpgCapFlag_Set(CVI_TRUE);
+        } else if (receivedSignal == SIGINT || receivedSignal == SIGTERM) {
+            return app_ipcam_Exit();
+        } else if ((receivedSignal < 0 && signalError != EAGAIN && signalError != EINTR) ||
+            !app_ipcam_Preview_NetworkAlive()) {
+            APP_PROF_LOG_PRINT(LEVEL_ERROR, "Camera control or network helper stopped; shutting down ipcamera\n");
+            app_ipcam_Exit();
+            return CVI_FAILURE;
+        }
     };
     
     return CVI_SUCCESS;
