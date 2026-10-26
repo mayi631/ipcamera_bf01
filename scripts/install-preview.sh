@@ -37,7 +37,7 @@ ROOTFS=$(CDPATH= cd -- "$ROOTFS" && pwd)
     echo 'Refusing to replace an existing /usr/bin/bf01-preview file' >&2
     exit 1
 }
-for FILE in ipcamera param_config.ini bf01_atbm_ap bf01-preview ap.conf; do
+for FILE in ipcamera param_config.ini bf01_atbm_ap bf01-preview ap.conf capture.ini; do
     [ -f "$SOURCE/$FILE" ] || { echo "Missing $SOURCE/$FILE; build and install IPC first" >&2; exit 1; }
 done
 if [ -n "$AP_CONFIG" ]; then
@@ -51,9 +51,11 @@ DEST="$ROOTFS/mnt/system/bf01-preview"
 install -d -m 755 "$DEST" "$ROOTFS/usr/bin"
 install -m 755 "$SOURCE/ipcamera" "$SOURCE/bf01_atbm_ap" "$SOURCE/bf01-preview" "$DEST/"
 install -m 644 "$SOURCE/param_config.ini" "$DEST/param_config.ini"
+install -m 600 "$SOURCE/capture.ini" "$DEST/capture.ini"
 install -m 600 "${AP_CONFIG:-$SOURCE/ap.conf}" "$DEST/ap.conf"
 printf '%s\n' "$BOOT_MODE" > "$DEST/boot.mode"
 install -m 755 "$RESOURCE/S99zpreview" "$ROOTFS/etc/init.d/S99zpreview"
+install -m 755 "$RESOURCE/auto.sh.example" "$DEST/auto.sh"
 ln -sfn /mnt/system/bf01-preview/bf01-preview "$ROOTFS/usr/bin/bf01-preview"
 echo "Staged preview under $DEST; factory boot=$BOOT_MODE"
 echo 'Existing S99user and auto.sh are unchanged. Run after rootfs-prepare; rerun after rootfs-clean.'

@@ -13,6 +13,8 @@ OBJS 	:= $(SRCS:$(SDIR)/%.c=$(ODIR)/%.$(TARGET_MACHINE).$(SOC_NICK_NAME_LOWER).o
 DEPS 	:= $(OBJS:%.o=%.d)
 #
 INCS	+= -I$(CURDIR)/include
+INCS += -I$(APP_PREBUILT_DIR)/ffmpeg/include
+LIBS += -Wl,-Bstatic -L$(FFMPEG_LIB_DIR) -lavformat -lavcodec -lavutil -Wl,-Bdynamic -lm
 #
 CFLAGS += $(INCS)
 CXXFLAGS += $(INCS)

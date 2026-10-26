@@ -24,6 +24,7 @@ install:
 	@mkdir -p $(APP_INSTALL_DIR)
 	@mkdir -p $(APP_INSTALL_DIR)/rawimages
 	@cp -rf $(TARGET) $(APP_INSTALL_DIR)
+	@install -m 600 $(APP_RESOURCE_DIR)/preview/capture.ini $(APP_INSTALL_DIR)/capture.ini
 ifeq ($(CONFIG_MODULE_PREVIEW),y)
 	@install -m 755 $(TARGET_OUT_DIR)/bin/bf01_atbm_ap $(APP_INSTALL_DIR)/bf01_atbm_ap
 	@install -m 755 $(APP_RESOURCE_DIR)/preview/bf01-preview $(APP_INSTALL_DIR)/bf01-preview

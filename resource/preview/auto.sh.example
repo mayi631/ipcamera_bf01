@@ -10,8 +10,7 @@ elif [ -f "$BASE/boot.mode" ]; then
     read -r MODE < "$BASE/boot.mode" || exit 1
 fi
 case "$MODE" in
-    off) exit 0 ;;
-    ap|sta) ;;
+    off|ap|sta) ;;
     *) echo 'IPCamera: invalid boot mode' >&2; exit 1 ;;
 esac
 mkdir -p /run/bf01-preview || exit 1

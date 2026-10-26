@@ -1,16 +1,18 @@
 #!/bin/sh
 
-PREVIEW=/mnt/system/bf01-preview/bf01-preview
-[ -x "$PREVIEW" ] || exit 0
+BASE=/mnt/system/bf01-preview
+PREVIEW=$BASE/bf01-preview
+[ -x "$BASE/ipcamera" ] || exit 0
 case "$1" in
     start)
-        "$PREVIEW" boot >/run/bf01-preview-boot.log 2>&1 </dev/null &
+        "$BASE/auto.sh" >/run/bf01-preview-boot.log 2>&1 </dev/null &
         ;;
     stop)
         "$PREVIEW" stop
         ;;
     restart)
-        "$PREVIEW" stop && "$PREVIEW" boot
+        "$PREVIEW" stop || exit 1
+        "$BASE/auto.sh" >/run/bf01-preview-boot.log 2>&1 </dev/null &
         ;;
     *) echo 'Usage: S99zpreview {start|stop|restart}' >&2; exit 1 ;;
 esac

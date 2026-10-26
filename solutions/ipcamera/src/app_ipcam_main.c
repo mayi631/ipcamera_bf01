@@ -9,6 +9,8 @@
 #include "app_ipcam_paramparse.h"
 #include "cvi_mbuf.h"
 #include "app_ipcam_preview.h"
+#include "app_ipcam_capture.h"
+#include "app_ipcam_storage.h"
 
 /**************************************************************************
  *                              M A C R O S                               *
@@ -101,6 +103,8 @@ static int app_ipcam_MiscThread_DeInit(void)
 
 static int app_ipcam_Exit(void)
 {
+    app_ipcam_Capture_Stop();
+    app_ipcam_Storage_Stop();
     app_ipcam_Preview_Stop();
     APP_CHK_RET(app_ipcam_MiscThread_DeInit(), "DeInit Misc Process");
 
@@ -153,9 +157,9 @@ static int app_ipcam_Exit(void)
     APP_CHK_RET(app_ipcam_Display_Exit(), "Display Exit");
     #endif
 
-    APP_CHK_RET(app_ipcam_Vpss_DeInit(), "Vpss DeInit");
-
     APP_CHK_RET(app_ipcam_Venc_Stop(APP_VENC_ALL), "Venc Stop");
+
+    APP_CHK_RET(app_ipcam_Vpss_DeInit(), "Vpss DeInit");
 
     APP_CHK_RET(app_ipcam_Vi_DeInit(), "Vi DeInit");
 
@@ -229,7 +233,15 @@ static int app_ipcam_Init(void)
 
 int main(int argc, char *argv[])
 {
-    system("echo /mnt/nfs/core-%e-%p-%t > /proc/sys/kernel/core_pattern");
+    if (argc > 1 && !strcmp(argv[1], "--capture-config")) {
+        if (argc != 4) {
+            fprintf(stderr, "Usage: ipcamera --capture-config SECONDS(1-300) CHANNEL(0-2)\n");
+            return EXIT_FAILURE;
+        }
+        return app_ipcam_Capture_Configure(argv[2], argv[3]) == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
+    if (access("/proc/sys/kernel/core_pattern", W_OK) == 0)
+        system("echo /mnt/nfs/core-%e-%p-%t > /proc/sys/kernel/core_pattern");
     APP_CHK_RET(app_ipcam_Opts_Parse(argc, argv), "parse optinos");
 
     sigset_t photoSignals;
@@ -255,7 +267,13 @@ int main(int argc, char *argv[])
     /* start video encode */
     APP_CHK_RET(app_ipcam_Venc_Start(APP_VENC_ALL), "start video processing");
 
-    APP_CHK_RET(app_ipcam_Preview_Start(), "start BF01 preview control");
+    APP_CHK_RET(app_ipcam_Storage_Start(), "start SD storage monitor");
+    APP_CHK_RET(app_ipcam_Capture_Start(), "start boot capture workflow");
+
+    int previewStarted = app_ipcam_Preview_Start() == CVI_SUCCESS;
+    if (!previewStarted)
+        APP_PROF_LOG_PRINT(LEVEL_ERROR, "Preview control unavailable; local capture remains enabled\n");
+    unsigned int previewRetry = 0;
 
     #ifdef VDEC_SUPPORT
     APP_CHK_RET(app_ipcam_Vdec_Start(), "Start VDEC");
@@ -303,14 +321,27 @@ int main(int argc, char *argv[])
         int receivedSignal = sigtimedwait(&photoSignals, NULL, &waitTime);
         int signalError = errno;
         if (receivedSignal == SIGUSR1) {
-            app_ipcam_JpgCapFlag_Set(CVI_TRUE);
+            uint64_t generation;
+            int storageError = app_ipcam_Storage_Acquire(&generation);
+            if (storageError) {
+                fprintf(stderr, "[storage] manual photo rejected: SD not ready, error=%d\n", storageError);
+            } else {
+                app_ipcam_JpgCapFlag_Set(CVI_TRUE);
+                app_ipcam_Storage_Release();
+            }
         } else if (receivedSignal == SIGINT || receivedSignal == SIGTERM) {
             return app_ipcam_Exit();
-        } else if ((receivedSignal < 0 && signalError != EAGAIN && signalError != EINTR) ||
-            !app_ipcam_Preview_NetworkAlive()) {
-            APP_PROF_LOG_PRINT(LEVEL_ERROR, "Camera control or network helper stopped; shutting down ipcamera\n");
+        } else if (receivedSignal < 0 && signalError != EAGAIN && signalError != EINTR) {
+            APP_PROF_LOG_PRINT(LEVEL_ERROR, "Camera control stopped; shutting down ipcamera\n");
             app_ipcam_Exit();
             return CVI_FAILURE;
+        }
+        app_ipcam_Preview_NetworkAlive();
+        if (!previewStarted && previewRetry++ % 5 == 0) {
+            const char *mode = getenv("BF01_WIFI_MODE");
+            if (access("/run/bf01-preview/network.ready", F_OK) == 0 ||
+                (mode && !strcmp(mode, "off") && access("/sys/class/net/wlan0", F_OK) == 0))
+                previewStarted = app_ipcam_Preview_Start() == CVI_SUCCESS;
         }
     };
     

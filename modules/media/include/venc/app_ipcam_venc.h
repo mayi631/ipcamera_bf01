@@ -257,6 +257,7 @@ int app_ipcam_Venc_Init(APP_VENC_CHN_E VencIdx);
 int app_ipcam_Venc_Start(APP_VENC_CHN_E VencIdx);
 int app_ipcam_Venc_Stop(APP_VENC_CHN_E VencIdx);
 void app_ipcam_JpgCapFlag_Set(CVI_BOOL bEnable);
+int app_ipcam_Jpeg_CaptureTo(const char *path);
 int app_ipcam_VencSize_Set(void);
 int app_ipcam_VencResize_Stop(APP_VENC_CHN_E enVencChn, CVI_S32 bSubSizeReset);
 int app_ipcam_VencResize_Start(APP_VENC_CHN_E enVencChn, CVI_S32 bSubSizeReset);

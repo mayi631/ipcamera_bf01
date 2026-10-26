@@ -173,7 +173,7 @@ start_service()
     nohup "$BASE/ipcamera" -i "$BASE/param_config.ini" </dev/null >"$RUN/service.log" 2>&1 7>&- &
     NEW_PID=$!
     COUNT=0
-    while [ ! -f "$RUN/service.ready" ]; do
+    while [ ! -f "$RUN/service.ready" ] || [ ! -f "$RUN/network.ready" ]; do
         kill -0 "$NEW_PID" 2>/dev/null || {
             tail -30 "$RUN/service.log" >&2
             fail 'startup failed'

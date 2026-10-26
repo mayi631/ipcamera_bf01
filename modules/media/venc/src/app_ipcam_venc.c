@@ -45,6 +45,7 @@ APP_PARAM_VENC_CTX_S g_stVencCtx, *g_pstVencCtx = &g_stVencCtx;
 
 static pthread_t g_Venc_pthread[VENC_CHN_MAX];
 static RUN_THREAD_PARAM mStreamTaskThd;
+static pthread_mutex_t JpgEncodeMutex = PTHREAD_MUTEX_INITIALIZER;
 
 static CVI_BOOL bJpgCapFlag = CVI_FALSE;
 pthread_cond_t JpgCapCond = PTHREAD_COND_INITIALIZER;
@@ -1226,21 +1227,125 @@ static void *Thread_Streaming_Proc(void *pArgs)
 
 }
 
+static int capture_jpeg(APP_VENC_CHN_CFG_S *encoder, const char *path)
+{
+    VIDEO_FRAME_INFO_S frame = {0};
+    VENC_PACK_S packs[JPEG_STREAM_PACK_COUNT] = {0};
+    VENC_STREAM_S stream = { .pstPack = packs, .u32PackCount = JPEG_STREAM_PACK_COUNT };
+    int result;
+    int frameHeld = 0;
+    int streamHeld = 0;
+    FILE *output = NULL;
+    pthread_mutex_lock(&JpgEncodeMutex);
+    if (CVI_VPSS_GetChnFrame(encoder->VpssGrp, encoder->VpssChn, &frame, 0) == CVI_SUCCESS)
+        CVI_VPSS_ReleaseChnFrame(encoder->VpssGrp, encoder->VpssChn, &frame);
+    result = CVI_VPSS_GetChnFrame(encoder->VpssGrp, encoder->VpssChn, &frame, 2000);
+    if (result != CVI_SUCCESS)
+        goto done;
+    frameHeld = 1;
+    result = CVI_VENC_SendFrame(encoder->VencChn, &frame, 2000);
+    if (result != CVI_SUCCESS)
+        goto done;
+    result = CVI_VENC_GetStream(encoder->VencChn, &stream, 2000);
+    if (result != CVI_SUCCESS)
+        goto done;
+    streamHeld = 1;
+    if (!stream.u32PackCount || stream.u32PackCount > JPEG_STREAM_PACK_COUNT) {
+        result = CVI_FAILURE;
+        goto done;
+    }
+    size_t jpegSize = 0;
+    unsigned char first[2] = {0};
+    unsigned char last[2] = {0};
+    for (CVI_U32 index = 0; index < stream.u32PackCount; index++) {
+        VENC_PACK_S *pack = &stream.pstPack[index];
+        if (!pack->pu8Addr || pack->u32Offset > pack->u32Len) {
+            result = CVI_FAILURE;
+            goto done;
+        }
+        const unsigned char *data = pack->pu8Addr + pack->u32Offset;
+        size_t length = pack->u32Len - pack->u32Offset;
+        for (size_t offset = 0; offset < length && jpegSize + offset < sizeof(first); offset++)
+            first[jpegSize + offset] = data[offset];
+        if (length >= sizeof(last)) {
+            last[0] = data[length - 2];
+            last[1] = data[length - 1];
+        } else if (length == 1) {
+            last[0] = last[1];
+            last[1] = data[0];
+        }
+        jpegSize += length;
+    }
+    if (jpegSize < 4 || first[0] != 0xff || first[1] != 0xd8 || last[0] != 0xff || last[1] != 0xd9) {
+        fprintf(stderr, "[capture] incomplete JPEG: channel=%d packs=%u bytes=%zu "
+            "start=%02x%02x end=%02x%02x\n", encoder->VencChn, stream.u32PackCount, jpegSize,
+            first[0], first[1], last[0], last[1]);
+        result = -EBADMSG;
+        goto done;
+    }
+    if (!path) {
+        result = _streaming_save_to_flash(encoder, &stream);
+        goto done;
+    }
+    output = fopen(path, "wbx");
+    if (!output) {
+        result = CVI_FAILURE;
+        goto done;
+    }
+    size_t total = 0;
+    for (CVI_U32 index = 0; index < stream.u32PackCount; index++) {
+        VENC_PACK_S *pack = &stream.pstPack[index];
+        if (!pack->pu8Addr || pack->u32Offset > pack->u32Len) {
+            result = CVI_FAILURE;
+            goto done;
+        }
+        size_t length = pack->u32Len - pack->u32Offset;
+        if (fwrite(pack->pu8Addr + pack->u32Offset, 1, length, output) != length) {
+            result = CVI_FAILURE;
+            goto done;
+        }
+        total += length;
+    }
+    if (!total || fflush(output) != 0 || fsync(fileno(output)) != 0)
+        result = CVI_FAILURE;
+done:
+    if (output && fclose(output) != 0)
+        result = CVI_FAILURE;
+    if (streamHeld && CVI_VENC_ReleaseStream(encoder->VencChn, &stream) != CVI_SUCCESS)
+        result = CVI_FAILURE;
+    if (frameHeld && CVI_VPSS_ReleaseChnFrame(encoder->VpssGrp, encoder->VpssChn, &frame) != CVI_SUCCESS)
+        result = CVI_FAILURE;
+    if (result != CVI_SUCCESS) {
+        if (output && path)
+            unlink(path);
+        APP_PROF_LOG_PRINT(LEVEL_ERROR, "JPEG capture failed on channel %d: %#x\n", encoder->VencChn, result);
+    }
+    pthread_mutex_unlock(&JpgEncodeMutex);
+    return result;
+}
+
+int app_ipcam_Jpeg_CaptureTo(const char *path)
+{
+    if (!path || !*path)
+        return CVI_FAILURE;
+    for (int index = 0; index < g_pstVencCtx->s32VencChnCnt; index++) {
+        APP_VENC_CHN_CFG_S *encoder = &g_pstVencCtx->astVencChnCfg[index];
+        if (encoder->bEnable && encoder->bStart && encoder->enType == PT_JPEG) {
+            int result = capture_jpeg(encoder, path);
+            if (result == -EBADMSG) {
+                fprintf(stderr, "[capture] retrying incomplete JPEG with a fresh frame\n");
+                result = capture_jpeg(encoder, path);
+            }
+            return result;
+        }
+    }
+    return CVI_FAILURE;
+}
+
 static void *Thread_Jpg_Proc(void *pArgs)
 {
-    CVI_S32 s32Ret = CVI_SUCCESS;
-
-    APP_VENC_CHN_CFG_S *pstVencChnCfg = (APP_VENC_CHN_CFG_S *)pArgs;
-    VENC_CHN VencChn = pstVencChnCfg->VencChn;
-
-    CVI_CHAR TaskName[64];
-    sprintf(TaskName, "Thread_JpegEnc");
-    prctl(PR_SET_NAME, TaskName, 0, 0, 0);
-    APP_PROF_LOG_PRINT(LEVEL_DEBUG, "jpg encode task start \n");
-
-    CVI_S32 vpssGrp = pstVencChnCfg->VpssGrp;
-    CVI_S32 vpssChn = pstVencChnCfg->VpssChn;
-    VIDEO_FRAME_INFO_S stVencFrame = {0};
+    APP_VENC_CHN_CFG_S *pstVencChnCfg = pArgs;
+    prctl(PR_SET_NAME, "Thread_JpegEnc", 0, 0, 0);
 
     while (1) {
         pthread_mutex_lock(&JpgCapMutex);
@@ -1254,54 +1359,8 @@ static void *Thread_Jpg_Proc(void *pArgs)
         bJpgCapFlag = CVI_FALSE;
         pthread_mutex_unlock(&JpgCapMutex);
 
-        {
-            if (access(pstVencChnCfg->SavePath, W_OK) != 0) {
-                APP_PROF_LOG_PRINT(LEVEL_ERROR, "JPEG save directory is not writable: %s\n", pstVencChnCfg->SavePath);
-                continue;
-            }
-            if (CVI_VPSS_GetChnFrame(vpssGrp, vpssChn, &stVencFrame, 0) == CVI_SUCCESS) {
-                CVI_VPSS_ReleaseChnFrame(vpssGrp, vpssChn, &stVencFrame);
-            }
-            s32Ret = CVI_VPSS_GetChnFrame(vpssGrp, vpssChn, &stVencFrame, 2000);
-            if (s32Ret != CVI_SUCCESS) {
-                APP_PROF_LOG_PRINT(LEVEL_INFO, "CVI_VPSS_GetChnFrame failed! %d\n", s32Ret);
-                continue;
-            }
-#ifdef CAPUTRE_FAST_IMAGE
-            //first CVI_VPSS_GetChnFrame tick time
-            APP_PROF_LOG_PRINT(LEVEL_INFO, "JPEG CVI_VPSS_GetChnFrame time %ld\r\n", GetTimerTickCount());
-#endif
-            s32Ret = CVI_VENC_SendFrame(VencChn, &stVencFrame, 2000);
-            if (s32Ret != CVI_SUCCESS) {
-                APP_PROF_LOG_PRINT(LEVEL_INFO, "CVI_VENC_SendFrame failed! %d\n", s32Ret);
-                goto rls_frame;
-            }
-
-            VENC_PACK_S streamPacks[JPEG_STREAM_PACK_COUNT] = {0};
-            VENC_STREAM_S stStream = {
-                .pstPack = streamPacks,
-                .u32PackCount = JPEG_STREAM_PACK_COUNT,
-            };
-
-            s32Ret = CVI_VENC_GetStream(VencChn, &stStream, 2000);
-            if (s32Ret != CVI_SUCCESS) {
-                APP_PROF_LOG_PRINT(LEVEL_ERROR, "CVI_VENC_GetStream, VencChn = %d, s32Ret = 0x%X\n", VencChn, s32Ret);
-                goto rls_frame;
-            } else {
-                CVI_VPSS_ReleaseChnFrame(vpssGrp, vpssChn, &stVencFrame);
-            }
-            s32Ret = _streaming_save_to_flash(pstVencChnCfg, &stStream);
-            if (s32Ret != CVI_SUCCESS) {
-                APP_PROF_LOG_PRINT(LEVEL_ERROR, "JPEG save failed on VencChn %d\n", VencChn);
-            }
-
-            CVI_VENC_ReleaseStream(VencChn, &stStream);
-
-            continue;
-
-        rls_frame:
-            CVI_VPSS_ReleaseChnFrame(vpssGrp, vpssChn, &stVencFrame);
-        }
+        if (access(pstVencChnCfg->SavePath, W_OK) == 0)
+            capture_jpeg(pstVencChnCfg, NULL);
     }
 
     return (void *) CVI_SUCCESS;

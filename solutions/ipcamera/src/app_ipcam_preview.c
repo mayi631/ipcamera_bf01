@@ -50,8 +50,9 @@ int app_ipcam_Preview_NetworkAlive(void)
     pid_t result = waitpid(network_pid, NULL, WNOHANG);
     if (result == 0 || (result < 0 && errno == EINTR))
         return 1;
-    network_pid = 0;
-    return 0;
+    network_pid = -1;
+    fprintf(stderr, "ipcamera: network helper stopped; local capture continues\n");
+    return 1;
 }
 
 int app_ipcam_Preview_Prepare(void)
@@ -109,13 +110,15 @@ int app_ipcam_Preview_Prepare(void)
     strcpy(name, "/bf01-preview");
     if (access(helper, X_OK) != 0) {
         fprintf(stderr, "ipcamera: missing internal network helper: %s\n", helper);
-        return -1;
+        return 0;
     }
     snprintf(owner, sizeof(owner), "%ld", (long)getpid());
     unlink("/run/bf01-preview/network.ready");
     network_pid = fork();
-    if (network_pid < 0)
-        return -1;
+    if (network_pid < 0) {
+        fprintf(stderr, "ipcamera: network helper could not start; local capture continues\n");
+        return 0;
+    }
     if (network_pid == 0) {
         sigset_t signals;
         sigemptyset(&signals);
@@ -123,21 +126,7 @@ int app_ipcam_Preview_Prepare(void)
         execl(helper, helper, "_network", mode, owner, (char *)NULL);
         _exit(127);
     }
-    for (unsigned int attempt = 0; attempt < 120; attempt++) {
-        sigset_t pending;
-        if (sigpending(&pending) == 0 &&
-            (sigismember(&pending, SIGINT) || sigismember(&pending, SIGTERM)))
-            return -1;
-        if (!app_ipcam_Preview_NetworkAlive()) {
-            fprintf(stderr, "ipcamera: Wi-Fi startup failed; camera was not started\n");
-            return -1;
-        }
-        if (access("/run/bf01-preview/network.ready", F_OK) == 0)
-            return 0;
-        sleep(1);
-    }
-    fprintf(stderr, "ipcamera: Wi-Fi startup timed out\n");
-    return -1;
+    return 0;
 }
 
 int app_ipcam_Preview_Enabled(void)
