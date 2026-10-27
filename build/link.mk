@@ -154,7 +154,7 @@ endif # libs static link end
 LIBS-$(CONFIG_MULTI_PROCESS_SUPPORT) += -lnanomsg
 
 ## RTSP
-LIBS-$(CONFIG_MODULE_RTSP) += -L$(CVI_RTSP_DIR)/lib -lcvi_comp_rtsp
+LIBS-$(CONFIG_MODULE_RTSP) += -L$(RTSP_DIR)/lib -lcomp_rtsp
 LIBS-$(CONFIG_MODULE_RTSP) += -L$(RINGBUFFER_DIR)/lib -lcvi_comp_ringbuffer
 LIBS-$(CONFIG_MODULE_RTSP) += -L$(CVI_OSAL_DIR)/lib -lcvi_comp_osal
 

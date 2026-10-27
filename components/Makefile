@@ -3,7 +3,7 @@ include $(SRCTREE)/build/rule.mk
 TOPTARGETS := all
 
 module-$(CONFIG_MODULE_RTSP)		+= cvi_osal
-module-$(CONFIG_MODULE_RTSP)		+= cvi_rtsp
+module-$(CONFIG_MODULE_RTSP)		+= rtsp
 module-$(CONFIG_MODULE_RTSP)		+= ringbuffer
 module-$(CONFIG_MODULE_RECORD)		+= ringbuffer
 
@@ -16,7 +16,7 @@ $(SUBDIRS):
 
 clean :
 	$(MAKE) -C cvi_osal clean
-	$(MAKE) -C cvi_rtsp clean
+	$(MAKE) -C rtsp clean
 	$(MAKE) -C ringbuffer clean
 
 install :

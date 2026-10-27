@@ -13,10 +13,10 @@ extern "C"
 #include "cvi_type.h"
 #include "cvi_common.h"
 #include "app_ipcam_comm.h"
-#include "cvi_rtsp.h"
+#include "rtsp.h"
 #include "cvi_osal.h"
 
-typedef struct CVI_RTSP_SER_ATTR {
+typedef struct RTSP_SER_ATTR {
     CVI_S32 id;
     CVI_CHAR rtsp_name[MAX_RTSP_NAME_LEN];
     CVI_S32 max_conn;
@@ -25,21 +25,21 @@ typedef struct CVI_RTSP_SER_ATTR {
     CVI_S32 auth_en;
     CVI_CHAR username[MAX_RTSP_NAME_LEN];
     CVI_CHAR password[MAX_RTSP_NAME_LEN];
-    CVI_RTSP_VIDEO_FORMAT_E video_codec;
-    CVI_RTSP_AUDIO_FORMAT_E audio_codec;
+    RTSP_VIDEO_FORMAT_E video_codec;
+    RTSP_AUDIO_FORMAT_E audio_codec;
     CVI_S32 audio_en;
     CVI_FLOAT framerate;
     CVI_S32 bitrate_kbps;
     CVI_S32 audio_sample_rate;
     CVI_S32 audio_channels;
     CVI_S32 audio_pernum;
-} CVI_RTSP_SER_ATTR_S;
+} RTSP_SER_ATTR_S;
 
 typedef struct RTSP_SERVICE_CONTEXT {
     CVI_S32 ref;
     CVI_S32 mute;
     CVI_CHAR *mute_data;
-    CVI_RTSP_SER_ATTR_S attr;
+    RTSP_SER_ATTR_S attr;
     cvi_osal_mutex_handle_t mutex;
     cvi_osal_task_handle_t media_task;
     CVI_S32 video_fd;

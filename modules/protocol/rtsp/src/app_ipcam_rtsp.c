@@ -42,7 +42,7 @@ APP_PARAM_RTSP_T *app_ipcam_Rtsp_Param_Get(void)
 }
 
 static CVI_S32 app_ipcam_RtspAttr_Init(VENC_CHN vencChn, CVI_S32 session_id
-    , CVI_RTSP_SER_ATTR_S *pstAttr)
+    , RTSP_SER_ATTR_S *pstAttr)
 {
     /* update vidoe streaming codec type from video attr */
     APP_VENC_CHN_CFG_S *pstVencChnCfg =
@@ -54,16 +54,16 @@ static CVI_S32 app_ipcam_RtspAttr_Init(VENC_CHN vencChn, CVI_S32 session_id
 
     switch (pstVencChnCfg->enType) {
         case PT_H264:
-            pstAttr->video_codec = CVI_RTSP_VIDEO_H264;
+            pstAttr->video_codec = RTSP_VIDEO_H264;
         break;
         case PT_H265:
-            pstAttr->video_codec = CVI_RTSP_VIDEO_H265;
+            pstAttr->video_codec = RTSP_VIDEO_H265;
         break;
         case PT_MJPEG:
-            pstAttr->video_codec = CVI_RTSP_VIDEO_MJPEG;
+            pstAttr->video_codec = RTSP_VIDEO_MJPEG;
         break;
         default:
-            pstAttr->video_codec = CVI_RTSP_VIDEO_BUTT;
+            pstAttr->video_codec = RTSP_VIDEO_BUTT;
             APP_PROF_LOG_PRINT(LEVEL_INFO, "No support type:%d.\n"
                 , pstVencChnCfg->enType);
         break;
@@ -72,7 +72,7 @@ static CVI_S32 app_ipcam_RtspAttr_Init(VENC_CHN vencChn, CVI_S32 session_id
     pstAttr->framerate = pstVencChnCfg->u32DstFrameRate;
 
     pstAttr->audio_en          = CVI_FALSE;
-    pstAttr->audio_codec       = CVI_RTSP_AUDIO_BUTT;
+    pstAttr->audio_codec       = RTSP_AUDIO_BUTT;
     pstAttr->audio_sample_rate = 0;
     pstAttr->audio_channels    = 0;
     pstAttr->audio_pernum      = 0;
@@ -84,7 +84,7 @@ static CVI_S32 app_ipcam_RtspAttr_Init(VENC_CHN vencChn, CVI_S32 session_id
     }
     if (pstAudioCfg->bInit) {
         pstAttr->audio_en          = CVI_TRUE;
-        pstAttr->audio_codec       = CVI_RTSP_AUDIO_PCM;
+        pstAttr->audio_codec       = RTSP_AUDIO_PCM;
         pstAttr->audio_sample_rate = pstAudioCfg->astAudioCfg.enSamplerate;
         pstAttr->audio_channels    = 1;
         pstAttr->audio_pernum      = pstAudioCfg->astAudioCfg.u32PtNumPerFrm;
@@ -113,7 +113,7 @@ static CVI_S32 app_ipcam_RtspAttr_Init(VENC_CHN vencChn, CVI_S32 session_id
 static void rtsp_service_media_task(void *arg)
 {
     CVI_S32 s32Ret = CVI_SUCCESS;
-    CVI_RTSP_FRAME_S frame = {0};
+    RTSP_FRAME_S frame = {0};
     RTSP_SERVICE_CONTEXT_S *ctx = (RTSP_SERVICE_CONTEXT_S *)arg;
 
     if (ctx == NULL) {
@@ -144,8 +144,8 @@ static void rtsp_service_media_task(void *arg)
 
     // Ensure that the first frame is I-frame
     ctx->i_frame_flag = 1;
-    if (ctx->attr.video_codec == CVI_RTSP_VIDEO_H264 ||
-        ctx->attr.video_codec == CVI_RTSP_VIDEO_H265) {
+    if (ctx->attr.video_codec == RTSP_VIDEO_H264 ||
+        ctx->attr.video_codec == RTSP_VIDEO_H265) {
         s32Ret = CVI_VENC_RequestIDR(mbufId, CVI_TRUE);
         if (s32Ret != CVI_SUCCESS) {
             APP_PROF_LOG_PRINT(LEVEL_WARN, "Request IDR for venc[%d] failed: %#x\n", mbufId, s32Ret);
@@ -186,18 +186,18 @@ static void rtsp_service_media_task(void *arg)
                 (stReadFrameInfo.frameParam.frameType == CVI_MEDIA_VFRAME_I)) {
                 frame.type = FRAME_TYPE_VIDEO;
                 frame.iskey[0] = (stReadFrameInfo.frameParam.frameType == CVI_MEDIA_VFRAME_I);
-                s32Ret = CVI_RTSP_SendFrame(ctx->rtsp_ser, &frame);
+                s32Ret = RTSP_SendFrame(ctx->rtsp_ser, &frame);
                 if (s32Ret != CVI_SUCCESS) {
-                    APP_PROF_LOG_PRINT(LEVEL_ERROR, "CVI_RTSP_WriteFrame failed\n");
+                    APP_PROF_LOG_PRINT(LEVEL_ERROR, "RTSP_SendFrame failed\n");
                 }
 #ifdef AUDIO_SUPPORT
             } else if (stReadFrameInfo.frameParam.frameType == CVI_MEDIA_AFRAME_A) {
                 // send audio data
                 frame.type = FRAME_TYPE_AUDIO;
                 frame.iskey[0] = 1;
-                s32Ret = CVI_RTSP_SendFrame(ctx->rtsp_ser, &frame);
+                s32Ret = RTSP_SendFrame(ctx->rtsp_ser, &frame);
                 if (s32Ret != CVI_SUCCESS) {
-                    APP_PROF_LOG_PRINT(LEVEL_ERROR, "CVI_RTSP_WriteFrame failed\n");
+                    APP_PROF_LOG_PRINT(LEVEL_ERROR, "RTSP_SendFrame failed\n");
                 }
 #endif
             } else {
@@ -289,16 +289,16 @@ static void rtsp_service_stop_media_by_name(char *name)
     pthread_mutex_unlock(&RtspMutex);
 }
 
-static void rtsp_service_event_cb(CVI_RTSP_EVENT_S *e)
+static void rtsp_service_event_cb(RTSP_EVENT_S *e)
 {
     if (e) {
         switch (e->e) {
-        case CVI_RTSP_EVENT_CLI_CONNECT: {
+        case RTSP_EVENT_CLI_CONNECT: {
             APP_PROF_LOG_PRINT(LEVEL_INFO, "rtsp_service: "
                 "recv %s CONNECT %s Event. \n", e->rtsp_name, e->cli_ipaddr);
             rtsp_service_start_media_by_name(e->rtsp_name);
         } break;
-        case CVI_RTSP_EVENT_CLI_DISCONNECT: {
+        case RTSP_EVENT_CLI_DISCONNECT: {
             APP_PROF_LOG_PRINT(LEVEL_INFO, "rtsp_service: "
                 "recv %s DISCONNECT %s Event. \n", e->rtsp_name, e->cli_ipaddr);
             rtsp_service_stop_media_by_name(e->rtsp_name);
@@ -310,7 +310,7 @@ static void rtsp_service_event_cb(CVI_RTSP_EVENT_S *e)
 }
 
 static CVI_S32 rtsp_service_create(RTSP_SERVICE_CONTEXT_S **rtsp_ctx
-    , CVI_RTSP_SER_ATTR_S *attr)
+    , RTSP_SER_ATTR_S *attr)
 {
     if (pstRtspCtx->rtsp_ctx[attr->id] != NULL) {
         APP_PROF_LOG_PRINT(LEVEL_INFO, "%s is exist", attr->rtsp_name);
@@ -324,7 +324,7 @@ static CVI_S32 rtsp_service_create(RTSP_SERVICE_CONTEXT_S **rtsp_ctx
         return CVI_FAILURE;
     }
     memset(ctx, 0x0, sizeof(RTSP_SERVICE_CONTEXT_S));
-    memcpy(&ctx->attr, attr, sizeof(CVI_RTSP_SER_ATTR_S));
+    memcpy(&ctx->attr, attr, sizeof(RTSP_SER_ATTR_S));
     ctx->mute = ((attr->audio_en == 1) ? 0 : 1);
     cvi_osal_mutex_attr_t mutex_attr;
     mutex_attr.name = "rtsp_service_mutex";
@@ -332,10 +332,10 @@ static CVI_S32 rtsp_service_create(RTSP_SERVICE_CONTEXT_S **rtsp_ctx
     cvi_osal_mutex_create(&mutex_attr, &ctx->mutex);
     APP_PROF_LOG_PRINT(LEVEL_INFO, "rtsp_service init mute %d\n", ctx->mute);
 
-    CVI_RTSP_INFO_S rtsp_info;
-    memset(&rtsp_info, 0x0, sizeof(CVI_RTSP_INFO_S));
-    CVI_RTSP_MEDIA_INFO_S media_info;
-    memset(&media_info, 0x0, sizeof(CVI_RTSP_MEDIA_INFO_S));
+    RTSP_INFO_S rtsp_info;
+    memset(&rtsp_info, 0x0, sizeof(RTSP_INFO_S));
+    RTSP_MEDIA_INFO_S media_info;
+    memset(&media_info, 0x0, sizeof(RTSP_MEDIA_INFO_S));
 
     strcpy(rtsp_info.username, attr->username);
     strcpy(rtsp_info.password, attr->password);
@@ -350,7 +350,7 @@ static CVI_S32 rtsp_service_create(RTSP_SERVICE_CONTEXT_S **rtsp_ctx
     media_info.framerate = attr->framerate;
     media_info.bitrate_kbps = attr->bitrate_kbps;
     media_info.video_codec = attr->video_codec;
-    media_info.audio_codec = CVI_RTSP_AUDIO_BUTT;
+    media_info.audio_codec = RTSP_AUDIO_BUTT;
     if (attr->audio_en) {
         media_info.audio_codec = attr->audio_codec;
         media_info.audio_channels = attr->audio_channels;
@@ -366,8 +366,9 @@ static CVI_S32 rtsp_service_create(RTSP_SERVICE_CONTEXT_S **rtsp_ctx
         media_info.framerate, media_info.bitrate_kbps, media_info.video_codec,
         media_info.audio_codec, media_info.audio_pernum);
 
-    CVI_RTSP_Create(&ctx->rtsp_ser, &rtsp_info, &media_info);
-    if (ctx->rtsp_ser == NULL) {
+    CVI_S32 ret = RTSP_Create(&ctx->rtsp_ser, &rtsp_info, &media_info);
+    if (ret != 0 || ctx->rtsp_ser == NULL) {
+        APP_PROF_LOG_PRINT(LEVEL_ERROR, "RTSP_Create failed: %d\n", ret);
         cvi_osal_mutex_destroy(ctx->mutex);
         free(ctx);
         return CVI_FAILURE;
@@ -387,14 +388,13 @@ static void rtsp_service_destroy(RTSP_SERVICE_CONTEXT_S *rtsp_ctx)
     APP_PROF_LOG_PRINT(LEVEL_INFO, "rtsp_service_destroy start.\n");
 
     if (rtsp_ctx == NULL) {
-        APP_PROF_LOG_PRINT(LEVEL_INFO, "%s is no exist"
-            , rtsp_ctx->attr.rtsp_name);
+        APP_PROF_LOG_PRINT(LEVEL_INFO, "RTSP context does not exist\n");
         return;
     }
 
-    s32Ret = CVI_RTSP_Destroy(rtsp_ctx->rtsp_ser);
+    s32Ret = RTSP_Destroy(rtsp_ctx->rtsp_ser);
     if (s32Ret != CVI_SUCCESS) {
-        APP_PROF_LOG_PRINT(LEVEL_ERROR, "CVI_RTSP_Destroy failed. s32Ret:%d.\n"
+        APP_PROF_LOG_PRINT(LEVEL_ERROR, "RTSP_Destroy failed. s32Ret:%d.\n"
             , s32Ret);
         return;
     }
@@ -412,7 +412,7 @@ static void rtsp_service_destroy(RTSP_SERVICE_CONTEXT_S *rtsp_ctx)
 CVI_S32 app_ipcam_Rtsp_Server_Create(CVI_VOID)
 {
     CVI_S32 s32Ret = 0;
-    CVI_RTSP_SER_ATTR_S stAttr[RTSP_INSTANCE_NUM] = {0};
+    RTSP_SER_ATTR_S stAttr[RTSP_INSTANCE_NUM] = {0};
     APP_PROF_LOG_PRINT(LEVEL_INFO, "app_ipcam_Rtsp_Server_Create start.\n");
 
     for (CVI_S32 i = 0; i < pstRtspCtx->session_cnt; i++) {

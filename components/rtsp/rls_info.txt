@@ -1,0 +1,8 @@
+.
+./samples
+./samples/sample_rtsp_server.h
+./samples/CMakeLists.txt
+./samples/output.h264
+./samples/output.pcm
+./samples/sample_rtsp_server.c
+./samples/sample_rtsp_client.c

@@ -3,7 +3,10 @@ install
 .config
 .config.old
 components/cvi_rtsp/lib/*
+components/rtsp/lib/
+components/rtsp/obj/
 components/cvi_osal/lib/*
 components/ringbuffer/lib/*
 solutions/**/obj/
 modules/**/obj/
+.vscode/
