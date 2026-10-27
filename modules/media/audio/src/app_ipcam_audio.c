@@ -574,7 +574,7 @@ static CVI_VOID *Thread_AudioAi_Proc(CVI_VOID *pArgs)
         iAudioFactor = s32OutputChnCnt * 4;
     }
 
-    CVI_MEDIA_FRAME_INFO_T stFrameInfo;
+    CVI_MEDIA_FRAME_INFO_T stFrameInfo = {0};
     stFrameInfo.frameBuf = malloc(pastAudioCfg->u32PtNumPerFrm * iAudioFactor);
     if (NULL == stFrameInfo.frameBuf)
     {
@@ -604,6 +604,8 @@ static CVI_VOID *Thread_AudioAi_Proc(CVI_VOID *pArgs)
             stNewFrame.u64VirAddr[0] = malloc(stNewFrame.u32Len);
             if (NULL == stNewFrame.u64VirAddr[0]) {
                 APP_PROF_LOG_PRINT(LEVEL_ERROR, "stNewFrame.u64VirAddr[0] malloc failed!\n");
+                CVI_AI_ReleaseFrame(pastAudioCfg->u32AiDevId, pastAudioCfg->u32ChnCnt - 1,
+                                    &stFrame, &stAecFrm);
                 break;
             }
             if (pastAudioCfg->enSoundmode == AUDIO_SOUND_MODE_MONO) {
@@ -627,7 +629,7 @@ static CVI_VOID *Thread_AudioAi_Proc(CVI_VOID *pArgs)
             stFrameInfo.frameParam.frameLen = stNewFrame.u32Len;
             stFrameInfo.frameParam.frameIndex = stNewFrame.u32Seq;
             stFrameInfo.frameParam.frameType  = CVI_MEDIA_AFRAME_A;
-            stFrameInfo.frameParam.frameCodec = pastAudioCfg->enAencType;
+            stFrameInfo.frameParam.frameCodec = PT_LPCM;
             stFrameInfo.frameParam.framePts   = stNewFrame.u64TimeStamp;
             stFrameInfo.frameParam.frameTime  = time(NULL);
 
@@ -635,7 +637,8 @@ static CVI_VOID *Thread_AudioAi_Proc(CVI_VOID *pArgs)
             {
                 if (pstVencCtx->astVencChnCfg[i].bEnable && (pstVencCtx->astVencChnCfg[i].enType != PT_JPEG))
                 {
-                    app_ipcam_Mbuf_Audio_WriteFrame(i, &stFrameInfo);
+                    app_ipcam_Mbuf_Audio_WriteFrame(pstVencCtx->astVencChnCfg[i].VencChn,
+                                                   &stFrameInfo);
                 }
             }
 
@@ -677,6 +680,11 @@ static CVI_VOID *Thread_AudioAi_Proc(CVI_VOID *pArgs)
         else
         {
             APP_PROF_LOG_PRINT(LEVEL_ERROR, "block mode return size 0...\n");
+        }
+        s32Ret = CVI_AI_ReleaseFrame(pastAudioCfg->u32AiDevId, pastAudioCfg->u32ChnCnt - 1,
+                                   &stFrame, &stAecFrm);
+        if (s32Ret != CVI_SUCCESS) {
+            APP_PROF_LOG_PRINT(LEVEL_ERROR, "CVI_AI_ReleaseFrame failed with %#x!\n", s32Ret);
         }
     }
     if (fp_rec)
@@ -1698,6 +1706,7 @@ int app_ipcam_Audio_Init(void)
     if (s32Ret != CVI_SUCCESS)
     {
         APP_PROF_LOG_PRINT(LEVEL_ERROR, "CVI_AUDIO_INIT failed with %#x!\n", s32Ret);
+        return s32Ret;
     }
 
     s32Ret = app_ipcam_Audio_CfgAcodec();
@@ -1739,12 +1748,13 @@ int app_ipcam_Audio_Init(void)
 AUDIO_EXIT:
     if (s32Ret != CVI_SUCCESS)
     {
+        CVI_S32 initRet = s32Ret;
         s32Ret = app_ipcam_Audio_UnInit();
         if (s32Ret != CVI_SUCCESS)
         {
             APP_PROF_LOG_PRINT(LEVEL_ERROR, "app_ipcam_Audio_UnInit failed with %#x!\n", s32Ret);
-            goto AUDIO_EXIT;
         }
+        return initRet;
     }
 
     g_pstAudioCfg->bInit = 1;
