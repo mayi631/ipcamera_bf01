@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <errno.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -50,7 +51,73 @@
 #define VOLUMEMAX   32767   //db [-80 0] <---> [0 120]
 static CVI_BOOL MP3_RUNNING = CVI_FALSE;
 
-APP_PARAM_AUDIO_CFG_T g_stAudioCfg, *g_pstAudioCfg = &g_stAudioCfg;
+APP_PARAM_AUDIO_CFG_T g_stAudioCfg = {
+#ifdef BF01_MIC_ONLY
+    .bCaptureOnly = true,
+#endif
+};
+APP_PARAM_AUDIO_CFG_T *g_pstAudioCfg = &g_stAudioCfg;
+
+void app_ipcam_Audio_ApplyCapturePolicy(APP_PARAM_AUDIO_CFG_T *parameters)
+{
+#ifdef BF01_MIC_ONLY
+    parameters->bCaptureOnly = true;
+    parameters->astAudioIntercom.bEnable = false;
+    APP_AUDIO_CFG_S *config = &parameters->astAudioCfg;
+    config->enSamplerate = AUDIO_SAMPLE_RATE_16000;
+    config->enReSamplerate = 0;
+    config->enBitwidth = AUDIO_BIT_WIDTH_16;
+    config->enWorkmode = AIO_MODE_I2S_MASTER;
+    config->enSoundmode = AUDIO_SOUND_MODE_MONO;
+    config->Cal_DB_Enable = false;
+    config->u32EXFlag = 0;
+    config->u32FrmNum = 4;
+    config->u32PtNumPerFrm = APP_AUDIO_PCM_SAMPLES;
+    config->u32ChnCnt = 2;
+    config->u32ClkSel = 0;
+    config->enI2sType = AIO_I2STYPE_INNERCODEC;
+    config->u32AiDevId = 0;
+    config->u32AiChn = 0;
+    config->enAencType = PT_AAC;
+    memset(&parameters->astAudioVqe, 0, sizeof(parameters->astAudioVqe));
+    parameters->astAudioVol.iDacLVol = 0;
+    parameters->astAudioVol.iDacRVol = 0;
+    if (parameters->astAudioVol.iAdcLVol < 0 || parameters->astAudioVol.iAdcLVol > 24)
+        parameters->astAudioVol.iAdcLVol = 9;
+#else
+    (void)parameters;
+#endif
+}
+
+int app_ipcam_Audio_SpeakerDisable(void)
+{
+#ifdef BF01_MIC_ONLY
+    char path[80];
+    snprintf(path, sizeof(path), "/sys/class/gpio/gpio%d/direction", SPEAKER_GPIO);
+    if (access(path, F_OK) != 0) {
+        int exportFd = open("/sys/class/gpio/export", O_WRONLY);
+        if (exportFd < 0)
+            return -errno;
+        char number[16];
+        int length = snprintf(number, sizeof(number), "%d", SPEAKER_GPIO);
+        int result = write(exportFd, number, length);
+        int error = result < 0 ? errno : (result != length ? EIO : 0);
+        close(exportFd);
+        if (error && error != EBUSY)
+            return -error;
+    }
+    int directionFd = open(path, O_WRONLY);
+    if (directionFd < 0)
+        return -errno;
+    int result = write(directionFd, "low", 3);
+    int error = result < 0 ? errno : (result != 3 ? EIO : 0);
+    close(directionFd);
+    if (error)
+        return -error;
+    APP_PROF_LOG_PRINT(LEVEL_INFO, "BF01 speaker disabled: GPIOA15 low; MIC capture only\n");
+#endif
+    return 0;
+}
 
 static RUN_THREAD_PARAM mAudioAiThread;
 static RUN_THREAD_PARAM mAudioAencThread;
@@ -1675,6 +1742,12 @@ static void app_ipcam_Audio_IntercomStop(void)
 
 int app_ipcam_Audio_Init(void)
 {
+    app_ipcam_Audio_ApplyCapturePolicy(g_pstAudioCfg);
+    int muteResult = app_ipcam_Audio_SpeakerDisable();
+    if (muteResult != 0)
+        return muteResult;
+    if (g_pstAudioCfg->bCaptureOnly)
+        return app_ipcam_Audio_CaptureInit();
     int s32Ret = 0;
 
     APP_AUDIO_CFG_S *pstAudioCfg = &g_pstAudioCfg->astAudioCfg;
@@ -1763,6 +1836,8 @@ AUDIO_EXIT:
 
 int app_ipcam_Audio_UnInit(void)
 {
+    if (g_pstAudioCfg->bCaptureOnly)
+        return app_ipcam_Audio_CaptureUnInit();
     int s32Ret = 0;
 
     APP_AUDIO_CFG_S *pstAudioCfg = &g_pstAudioCfg->astAudioCfg;
@@ -1812,6 +1887,8 @@ int app_ipcam_Audio_UnInit(void)
 
 int app_ipcam_Audio_AoPlay(char *pAudioFile, AUDIO_AO_PLAY_TYPE_E eAoType)
 {
+    if (g_pstAudioCfg->bCaptureOnly)
+        return -EOPNOTSUPP;
     int s32Ret = 0;
 
     if (NULL == pAudioFile)
@@ -2133,6 +2210,8 @@ int app_ipcam_Audio_AoPlay(char *pAudioFile, AUDIO_AO_PLAY_TYPE_E eAoType)
 
 int app_ipcam_CmdTask_AudioAttr_Set(CVI_MQ_MSG_t *msg, CVI_VOID *userdate)
 {
+    if (g_pstAudioCfg->bCaptureOnly)
+        return -EOPNOTSUPP;
     if (NULL == msg)
     {
         APP_PROF_LOG_PRINT(LEVEL_ERROR, "msg is NULL!\n");
@@ -2153,6 +2232,8 @@ int app_ipcam_CmdTask_AudioAttr_Set(CVI_MQ_MSG_t *msg, CVI_VOID *userdate)
 
 int app_ipcam_CmdTask_Mp3_Play(CVI_MQ_MSG_t *msg, CVI_VOID *userdate)
 {
+    if (g_pstAudioCfg->bCaptureOnly)
+        return -EOPNOTSUPP;
     CVI_CHAR param[512] = {0};
     snprintf(param, sizeof(param), "%s", msg->payload);
     APP_PROF_LOG_PRINT(LEVEL_INFO, "%s param:%s arg2=%d\n", __FUNCTION__, param, msg->arg2);
@@ -2192,6 +2273,8 @@ int app_ipcam_CmdTask_Mp3_Play(CVI_MQ_MSG_t *msg, CVI_VOID *userdate)
 
 int app_ipcam_Audio_AudioReset(APP_PARAM_AUDIO_CFG_T *pstAudioCfg)
 {
+    if (g_pstAudioCfg->bCaptureOnly)
+        return -EOPNOTSUPP;
     if (NULL == pstAudioCfg)
     {
         APP_PROF_LOG_PRINT(LEVEL_ERROR, "pstAudioCfg is NULL!\n");
@@ -2241,6 +2324,8 @@ int app_ipcam_Audio_AudioReset(APP_PARAM_AUDIO_CFG_T *pstAudioCfg)
 
 int app_ipcam_Audio_SetRecordStatus(APP_AUDIO_RECORD_T *pstAudioRecord)
 {
+    if (g_pstAudioCfg->bCaptureOnly)
+        return -EOPNOTSUPP;
     if (NULL == pstAudioRecord)
     {
         APP_PROF_LOG_PRINT(LEVEL_ERROR, "pstAudioRecord is NULL!\n");
@@ -2258,6 +2343,8 @@ int app_ipcam_Audio_SetRecordStatus(APP_AUDIO_RECORD_T *pstAudioRecord)
 
 int app_ipcam_Audio_SetPlayStatus(APP_AUDIO_RECORD_T *pstAudioPlay)
 {
+    if (g_pstAudioCfg->bCaptureOnly)
+        return -EOPNOTSUPP;
     if (NULL == pstAudioPlay)
     {
         APP_PROF_LOG_PRINT(LEVEL_ERROR, "pstAudioPlay is NULL!\n");
@@ -2280,4 +2367,3 @@ int app_ipcam_Audio_SetPlayStatus(APP_AUDIO_RECORD_T *pstAudioPlay)
     pthread_mutex_unlock(&RsAudioMutex);
     return 0;
 }
-

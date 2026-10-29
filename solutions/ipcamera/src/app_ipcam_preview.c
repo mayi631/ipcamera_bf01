@@ -60,6 +60,11 @@ int app_ipcam_Preview_Prepare(void)
     char helper[PATH_MAX];
     char owner[32];
     const char *mode = getenv("BF01_WIFI_MODE");
+#ifdef BF01_BOOT_CAPTURE
+    mode = "off";
+    if (setenv("BF01_WIFI_MODE", mode, 1) != 0)
+        return -1;
+#endif
     if (!mode)
         mode = "ap";
     if (strcmp(mode, "ap") && strcmp(mode, "sta") && strcmp(mode, "off")) {

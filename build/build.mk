@@ -27,11 +27,11 @@ else
   Q = @
 endif
 
-$(ODIR)/%.$(TARGET_MACHINE).$(SOC_NICK_NAME_LOWER).o : $(SDIR)/%.c
+$(ODIR)/%.$(TARGET_MACHINE).$(SOC_NICK_NAME_LOWER).o : $(SDIR)/%.c $(SRCTREE)/.config $(SRCTREE)/build/dep.mk
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(CC) $(CFLAGS) -o $@ -c $<
 
-$(ODIR)/%.$(TARGET_MACHINE).$(SOC_NICK_NAME_LOWER).o : $(SDIR)/%.cpp
+$(ODIR)/%.$(TARGET_MACHINE).$(SOC_NICK_NAME_LOWER).o : $(SDIR)/%.cpp $(SRCTREE)/.config $(SRCTREE)/build/dep.mk
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(CXX) $(CXXFLAGS) -o $@ -c $<
 

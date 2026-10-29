@@ -82,7 +82,7 @@ static CVI_S32 app_ipcam_RtspAttr_Init(VENC_CHN vencChn, CVI_S32 session_id
         APP_PROF_LOG_PRINT(LEVEL_ERROR, "audio config is null. \n");
         return CVI_FAILURE;
     }
-    if (pstAudioCfg->bInit) {
+    if (pstAudioCfg->bInit && !pstAudioCfg->bCaptureOnly) {
         pstAttr->audio_en          = CVI_TRUE;
         pstAttr->audio_codec       = RTSP_AUDIO_PCM;
         pstAttr->audio_sample_rate = pstAudioCfg->astAudioCfg.enSamplerate;

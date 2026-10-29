@@ -50,6 +50,8 @@ int Load_Param_Audio(const char * file)
     memset(tmp_section, 0, sizeof(tmp_section));
     snprintf(tmp_section, sizeof(tmp_section), "audio_config");
 
+    Auido->bCaptureOnly = ini_getl(tmp_section, "capture_only", 0, file) != 0;
+
     Auido->astAudioCfg.enSamplerate = ini_getl(tmp_section, "sample_rate", 0, file);
     Auido->astAudioCfg.enReSamplerate = ini_getl(tmp_section, "resample_rate", 0, file);
     Auido->astAudioCfg.Cal_DB_Enable = ini_getl(tmp_section, "Cal_DB_Enable", 0, file);
@@ -147,6 +149,7 @@ int Load_Param_Audio(const char * file)
     Auido->astAudioVqe.mAiAecCfg.para_aes_std_thrd    = ini_getl(tmp_section, "ai_std_thrd", 0, file);
     Auido->astAudioVqe.mAiAecCfg.para_aes_supp_coeff  = ini_getl(tmp_section, "ai_supp_coeff", 0, file);
 
+    app_ipcam_Audio_ApplyCapturePolicy(Auido);
     APP_PROF_LOG_PRINT(LEVEL_INFO, "loading audio config ------------------> done \n\n");
 
     return CVI_SUCCESS;

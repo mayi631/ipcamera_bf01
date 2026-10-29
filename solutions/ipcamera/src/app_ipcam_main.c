@@ -11,6 +11,7 @@
 #include "app_ipcam_preview.h"
 #include "app_ipcam_capture.h"
 #include "app_ipcam_storage.h"
+#include "app_ipcam_boot_capture.h"
 
 /**************************************************************************
  *                              M A C R O S                               *
@@ -104,6 +105,9 @@ static int app_ipcam_MiscThread_DeInit(void)
 static int app_ipcam_Exit(void)
 {
     app_ipcam_Capture_Stop();
+#ifdef BF01_BOOT_CAPTURE
+    app_ipcam_BootCapture_UnInit();
+#endif
     app_ipcam_Storage_Stop();
     app_ipcam_Preview_Stop();
     APP_CHK_RET(app_ipcam_MiscThread_DeInit(), "DeInit Misc Process");
@@ -187,6 +191,10 @@ static int app_ipcam_Init(void)
     APP_CHK_RET(app_ipcam_MsgAnonInit(), "init MsgAnon");
     #endif
 
+    #ifdef BF01_BOOT_CAPTURE
+    APP_CHK_RET(app_ipcam_BootCapture_Init(), "init RTOS boot capture receiver");
+    #endif
+
     APP_CHK_RET(app_ipcam_Peripheral_Init(), "Init Peripheral");
 
     APP_CHK_RET(app_ipcam_Sys_Init(), "init systerm");
@@ -211,7 +219,12 @@ static int app_ipcam_Init(void)
     #endif
 
     #ifdef AUDIO_SUPPORT
-    APP_CHK_RET(app_ipcam_Audio_Init(), "start audio processing");
+    int audioResult = app_ipcam_Audio_Init();
+    if (audioResult != CVI_SUCCESS) {
+        if (!app_ipcam_Audio_Param_Get()->bCaptureOnly)
+            return audioResult;
+        APP_PROF_LOG_PRINT(LEVEL_ERROR, "MIC unavailable: %#x; preview and photo remain available, audio recording will report failure\n", audioResult);
+    }
     #endif
 
     #ifdef CVI_UVC_SUPPORT
@@ -240,6 +253,9 @@ int main(int argc, char *argv[])
         }
         return app_ipcam_Capture_Configure(argv[2], argv[3]) == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
     }
+#ifdef AUDIO_SUPPORT
+    APP_CHK_RET(app_ipcam_Audio_SpeakerDisable(), "disable speaker before startup");
+#endif
     if (access("/proc/sys/kernel/core_pattern", W_OK) == 0)
         system("echo /mnt/nfs/core-%e-%p-%t > /proc/sys/kernel/core_pattern");
     APP_CHK_RET(app_ipcam_Opts_Parse(argc, argv), "parse optinos");
@@ -321,6 +337,12 @@ int main(int argc, char *argv[])
         int receivedSignal = sigtimedwait(&photoSignals, NULL, &waitTime);
         int signalError = errno;
         if (receivedSignal == SIGUSR1) {
+#ifdef BF01_BOOT_CAPTURE
+            if (!app_ipcam_BootCapture_Ready()) {
+                fprintf(stderr, "[boot-capture] manual photo rejected: RTOS still owns JPEG channel\n");
+                continue;
+            }
+#endif
             uint64_t generation;
             int storageError = app_ipcam_Storage_Acquire(&generation);
             if (storageError) {

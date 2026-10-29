@@ -4,6 +4,15 @@
 #include "app_ipcam_mq.h"
 #include "cvi_type.h"
 #include "cvi_comm_aio.h"
+#include <stdint.h>
+
+#define APP_AUDIO_PCM_SAMPLES 1024
+
+typedef struct {
+    int16_t samples[APP_AUDIO_PCM_SAMPLES];
+    unsigned int count;
+    uint64_t pts;
+} APP_AUDIO_PCM_FRAME;
 
 #ifdef __cplusplus
 extern "C"
@@ -66,6 +75,7 @@ typedef struct APP_AUDIO_INTERCOM_S
 typedef struct APP_PARAM_AUDIO_CFG_S
 {
     bool bInit;
+    bool bCaptureOnly;
     APP_AUDIO_INTERCOM_T astAudioIntercom;
     APP_AUDIO_VOL_T astAudioVol;
     APP_AUDIO_CFG_S astAudioCfg;
@@ -113,8 +123,15 @@ typedef struct APP_AUDIO_RECORD_S
 
 APP_PARAM_AUDIO_CFG_T *app_ipcam_Audio_Param_Get(void);
 
+void app_ipcam_Audio_ApplyCapturePolicy(APP_PARAM_AUDIO_CFG_T *parameters);
+int app_ipcam_Audio_SpeakerDisable(void);
 int app_ipcam_Audio_Init(void);
 int app_ipcam_Audio_UnInit(void);
+int app_ipcam_Audio_CaptureInit(void);
+int app_ipcam_Audio_CaptureUnInit(void);
+int app_ipcam_Audio_CaptureBegin(void);
+int app_ipcam_Audio_CaptureRead(APP_AUDIO_PCM_FRAME *frame);
+void app_ipcam_Audio_CaptureEnd(void);
 int app_ipcam_Audio_AoPlay(char *pAudioFile, AUDIO_AO_PLAY_TYPE_E eAoType);
 int app_ipcam_CmdTask_AudioAttr_Set(CVI_MQ_MSG_t *msg, CVI_VOID *userdate);
 int app_ipcam_CmdTask_Mp3_Play(CVI_MQ_MSG_t *msg, CVI_VOID *userdate);

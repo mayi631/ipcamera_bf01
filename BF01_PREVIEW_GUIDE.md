@@ -233,6 +233,90 @@ ls -lh /mnt/sd/Venc3_idx_*.jpg
 
 本次不增加 APP/HTTP 拍照接口。验收时需检查实际 JPG 尺寸为 2560×1440、画面完整、重复拍照正常，并在拍照和 MP4 录像过程中持续观察原有预览是否正常。旧 `/tmp/rec` 调试入口仍是裸流测试，不属于本次 MP4 流程，不要用它验证 MP4。
 
+## MP4 录像收音
+
+BF01 默认启用 `CONFIG_MODULE_MEDIA_AUDIO=y`。选择 BF01 GC4683 资源配置时，程序强制使用 MIC-only 策略：启动时先将板级喇叭使能 GPIOA15 拉低，只打开 MIC 输入，不初始化 AO、对讲、SDK AENC/ADEC，拒绝播放和旧音频重置命令。其它板型仍保留原音频行为。现有 RTSP 保持视频预览，本次 AAC 音轨只用于 MP4 录像。
+
+BF01 即使使用旧 `param_config.ini`（缺少 `capture_only`，或保留 8 kHz / G726 配置），也会在内存中固定为 16 kHz / 16 bit / 单声道、内置 ADC、每帧 1024 点，关闭旧 VQE/对讲配置，不会改写板端参数文件。ADC 音量沿用合法的 `adclvol`（0–24）；越界回退为 9，0 表示静音。源参数文件仍设置 `capture_only=1` 便于查看，但 BF01 的禁用播放策略不依赖新 INI。因此 `make ipcamera` 后使用 `sm3_zh_bf01 -s` 仅推送程序并重启，也会启用 MIC-only 录像，不再落入旧完整音频链路；无需为本修复改 SDK/BSP 或重新烧录整包。应用接管之前的启动阶段由 SDK/RTOS 控制，不属于此应用静音覆盖范围。
+
+录像链路为：MIC → 16 kHz / 16 bit / 单声道 PCM → 有界采音队列 → FFmpeg AAC-LC（48 kbps）→ 与选定通道的 H.264 交错封装为 MP4。沿用原来先拍照再录像的流程、录像时长配置和文件路径，不保存独立 PCM 或 AAC 文件。视频不重新编码；三路分辨率选择共用一个 MIC。音视频以录像首个关键帧建立时钟映射，音频按采样数连续计时，录像结束后排空编码器再发布最终文件。
+
+修改音频编译开关后，构建规则会使应用及模块对象根据 `.config` 重新编译，避免旧对象仍使用关闭音频时的结构或条件编译结果。按既有流程执行 `make ipcamera`、`make ipcamera install`、`make ipcamera pack_data`，再打包 SDK 固件即可。现有板端驱动若已正常注册采集设备，本功能不要求更改 SDK/BSP。
+
+板端正常启动应出现 `[audio] MIC ready`，录像时出现 `[audio] video/PCM clock mapping` 和 `[audio] MP4 AAC started`。最终任务应为 `state=awaiting_ai`、`error=0`。在电脑拉取实际 MP4 后检查：
+
+```sh
+ffprobe -v error -show_entries stream=codec_name,codec_type,sample_rate,channels,start_time,duration -of json DSCF00001.mp4
+ffmpeg -v error -i DSCF00001.mp4 -f null -
+```
+
+应包含 H.264 视频轨和 AAC、16000 Hz、单声道音轨。还需实际播放并在拍摄时拍手或说话，检查声音内容和口型/拍手同步，不能只凭存在音轨判定音质和同步合格。
+
+MIC 初始化失败时保留预览和拍照能力，但自动录像会报告失败，不把无声录像标记为有声任务成功。采音队列溢出、音频数据不连续、SD 拔出、取消或尾部采音超时也会失败退出；不会通过无限等待、补一整条静音或录像后转码掩盖问题。未完成文件不作为最终 MP4 发布。
+
+2026-10-27 正式修改版冷启动实测：1080P / 通道 0 / 10 秒任务 `task_DbLBXl` 和 720P / 通道 1 / 5 秒任务 `task_V3TjaZ` 都完成真实拍照、录像并进入 `awaiting_ai`，错误码为 0。拉取文件后确认分别为 150/75 帧 H.264，加 16 kHz 单声道 AAC，音视频均可完整解码且音频不是全零。从任务线程启动到文件发布分别约 11.017 秒、5.854 秒，不是整机上电总耗时。板端视频时钟与 Linux 采音时钟约有 3.74–3.76 秒偏移，已通过首帧映射处理。
+
+当前板端 FFmpeg 版本生成的文件，两条轨道的时长分别为 10.000/5.000 秒，容器总时长可能显示 10.064/5.064 秒，含一个 AAC 帧级的编码时延/填充；这不表示录制未结束。实际人声响度和拍手/口型同步仍需现场试听确认，通道 2 的冷启动及无线观流同时录像也需要后续验收。测试未修改原有 JPEG 热重启处理；原版应用也曾在反复热重启时出现不完整 JPEG，应与本次冷启动验证区分。
+
+## 小核上电三连拍（2026-10-28）
+
+此模式替代前文的 Linux 单张上电拍照及自动 AP/STA 启动流程。BF01 小核在
+`MEDIA_VIDEO_Init` 成功后自动抓取三张 1920×1440 JPEG，相邻照片目标间隔
+500 ms，并检查帧 PTS，避免把同一帧重复编码。2560×1440 传感器画面居中
+裁剪为 1920×1440，不拉伸。首张仍需等待小核媒体初始化及有效帧，尚未承诺
+从外部触发/上电到首张在 500 ms 内完成，需实机测量。
+
+启动时不运行 Wi-Fi boot 服务，应用也强制网络模式为 off，不加载 Wi-Fi 驱动、
+不启动热点或联网；旧 AP/STA 配置不会使本模式自动开启 Wi-Fi。驱动源码和编译
+选项默认关闭，保留驱动源码；当前生成的 `build/.config` 也已关闭
+`CONFIG_ATBM6461_BF01` 和 `CONFIG_CP_EXT_WIRELESS`。旧产物可能仍含驱动文件，
+但不会自动加载。本次不是硬件断电，后续 Wi-Fi 负责人可以重新启用。
+
+数据交接顺序：
+
+1. 小核 JPEG 存入多媒体保留内存，每张最多 2 MiB，三张总共最多 6 MiB；
+   不等待 Linux、SD 挂载或网络，也不会持续循环拍照累积内存。
+2. Linux `ipcamera` 通过独立 IPC 端口接收并校验大小/CRC/JPEG 头尾，暂存
+   `/run/ipcamera-burst/photo0.jpg`～`photo2.jpg`，该目录必须位于 tmpfs。
+3. SD 尚未就绪时状态为 `waiting_for_storage`；SD 就绪后使用原有命名规则保存
+   `/mnt/sd/DCIM/PHOTO/DSCFxxxxx.jpg`，每张经 `.part`、fsync、rename 发布。
+4. 三张照片及任务记录落盘成功后才通知小核释放缓存，并删除 `/run` 临时照片。
+   小核或接收失败会报错，不偷偷改回 Linux 重新拍三张。内存暂存不抗断电。
+5. 保留原来自动录像和 AI 待处理流程；本次没有改成 H.265/60 fps，三路预览
+   编码也未改动。任务记录的 `photo` 为第一张，`photo1/2/3` 为三张照片路径。
+
+必须同时更新小核和应用。已加载 SDK BF01 环境的终端先执行 `build_alios`，
+该命令更新 SDK 输出中的 yoc 镜像；然后在应用目录执行 `make ipcamera`、
+`make ipcamera install`、`make ipcamera pack_data`，最后回 SDK 执行
+`pack_rootfs`、`pack_upgrade`。烧录包必须包含新 yoc，不能仅推送应用 ELF。
+
+烧录后检查：
+
+```sh
+cat /run/ipcamera-capture/status.ini
+ls -lh /run/ipcamera-burst/
+ls -lh /mnt/sd/DCIM/PHOTO/
+grep 'boot-capture' /run/bf01-preview/service.log
+```
+
+小核日志含 `[boot-capture] photo=... captured_ms=... pts=...`；状态记录还包含
+`photo1_rtos_ms` / `photo1_pts_us` 等三张时间戳。小核时间与 Linux 时间不能
+直接相减推算上电耗时。完整保存后 `/run/ipcamera-burst/` 应为空。
+冷启动时不插 SD，可先确认三张已经缓存，再插卡检查自动落盘及文件完整性。
+小核连拍未完成时拒绝手动 SIGUSR1 拍照，避免双核争用 JPEG 通道。
+
+本次应用和小核已交叉编译；主机模拟验证三连拍调度、帧 PTS 去重、分包传输、
+丢回复重试、CRC、取消、SD 缺失和同步失败时保留源缓存，ASan/UBSan 检查通过。
+这些不等于硬件验收。2026-10-28 上板发现小核抓拍线程默认 4 KiB 栈不足，
+在获取 VPSS 帧时发生栈溢出，尚未完成三连拍。本次仅为抓拍线程显式分配
+32 KiB 栈，在线程创建时设置 detached 并检查属性/创建错误；没有增加全局线程
+默认栈，也没有修改 SD 保存逻辑。新 yoc 需重新编译烧录，再验证照片和时间戳。
+同时按原厂 JPEG 示例补齐 `u16InitialDelay = CVI_INITIAL_DELAY_DEFAULT`，修复
+日志中的 `s32InitialDelay = 0` / `CVI_VENC_SetRcParam` 错误，避免 JPEG 通道初始化
+提前退出，导致栈问题修复后仍无法编码。
+启动日志应包含 `[boot-capture] worker started: stack_bytes=32768`，随后出现
+三条 photo 日志及 `burst finished: count=3 error=0`，才代表三连拍完成。
+
 ## 验证边界
 
 自动采集流程已进行主机模拟测试：三种分辨率各 5 秒/10 秒 MP4 均检查时长并完整解码；验证先拍照后录像、任务目录唯一、无卡等待、配置非法、拍照失败、码流异常及正常退出中断的状态。交叉编译和链接使用项目已有的 FFmpeg 静态库，不新增板端 FFmpeg 共享库依赖。这些测试不等于板端通过，仍需烧录后验证 SD 自动挂载、真实硬件时间戳、MP4 可播放、采集同时预览以及 5 秒/10 秒设置生效。
