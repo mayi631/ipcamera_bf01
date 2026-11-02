@@ -426,11 +426,30 @@ int app_ipcam_Capture_Configure(const char *seconds, const char *channel)
 }
 
 #ifdef AUDIO_SUPPORT
-static int record_audio(struct app_mp4 *output, int64_t clock_offset)
+static int record_audio(struct app_mp4 *output, int64_t clock_offset, int boot_video,
+    uint64_t first_pts, uint64_t through_pts)
 {
     for (unsigned int index = 0; index < 64; index++) {
         APP_AUDIO_PCM_FRAME frame;
-        int received = app_ipcam_Audio_CaptureRead(&frame);
+        int received;
+#ifdef BF01_BOOT_CAPTURE
+        if (boot_video) {
+            received = app_ipcam_BootVideo_ReadAudio(frame.samples,
+                sizeof(frame.samples) / sizeof(frame.samples[0]), &frame.pts, first_pts, through_pts);
+            if (received == -EAGAIN)
+                break;
+            if (received > 0)
+                frame.count = (unsigned int)received;
+        } else
+#endif
+        {
+            received = app_ipcam_Audio_CaptureRead(&frame);
+        }
+#ifndef BF01_BOOT_CAPTURE
+        (void)boot_video;
+        (void)first_pts;
+        (void)through_pts;
+#endif
         if (received < 0)
             return -received;
         if (!received)
@@ -454,10 +473,16 @@ static int record_clip(struct capture_task *task)
     if (task->channel >= context->s32VencChnCnt)
         return EINVAL;
     APP_VENC_CHN_CFG_S *encoder = &context->astVencChnCfg[task->channel];
-    if (!encoder->bEnable || !encoder->bStart || encoder->enType != PT_H264 ||
-        !(encoder->StreamTo & 1) || encoder->enGopMode == VENC_GOPMODE_BIPREDB)
+    int boot_video = 0;
+#ifdef BF01_BOOT_CAPTURE
+    boot_video = app_ipcam_BootVideo_Available();
+#endif
+    if (!encoder->bEnable || !encoder->bStart || (!boot_video && encoder->enType != PT_H264) ||
+        (!boot_video && !(encoder->StreamTo & 1)) || encoder->enGopMode == VENC_GOPMODE_BIPREDB)
         return EINVAL;
-    CVI_MBUF_HANDLE *reader = app_ipcam_Mbuf_CreateReader(encoder->VencChn, 1);
+    if (boot_video)
+        fprintf(stderr, "[capture] using RTOS early video ring before Linux VENC stream\n");
+    CVI_MBUF_HANDLE *reader = boot_video ? NULL : app_ipcam_Mbuf_CreateReader(encoder->VencChn, 1);
     CVI_MEDIA_FRAME_INFO_T frame = {0};
     frame.frameBuf = malloc(CVI_MBUF_STREAM_MAX_SIZE);
     struct app_mp4 *output = NULL;
@@ -472,7 +497,7 @@ static int record_clip(struct capture_task *task)
     struct timespec lastFrame;
     clock_gettime(CLOCK_MONOTONIC, &lastFrame);
     struct timespec recordingBegin = lastFrame;
-    if (!reader || !frame.frameBuf) {
+    if ((!boot_video && !reader) || !frame.frameBuf) {
         error = ENOMEM;
         goto done;
     }
@@ -482,14 +507,23 @@ static int record_clip(struct capture_task *task)
         error = ENAMETOOLONG;
         goto done;
     }
-    output = app_mp4_open(partial, encoder->u32Width, encoder->u32Height);
+    unsigned int output_width = encoder->u32Width;
+    unsigned int output_height = encoder->u32Height;
+#ifdef BF01_BOOT_CAPTURE
+    if (boot_video && app_ipcam_BootVideo_GetSize(&output_width, &output_height) != 0) {
+        error = ENODEV;
+        goto done;
+    }
+#endif
+    output = boot_video ? app_mp4_open_h265(partial, output_width, output_height) :
+        app_mp4_open(partial, output_width, output_height);
     if (!output) {
         error = EIO;
         goto done;
     }
 #ifdef AUDIO_SUPPORT
-    if (app_ipcam_Audio_Param_Get()->bCaptureOnly) {
-        error = app_ipcam_Audio_CaptureBegin();
+    if (boot_video || app_ipcam_Audio_Param_Get()->bCaptureOnly) {
+        error = boot_video ? 0 : app_ipcam_Audio_CaptureBegin();
         if (error)
             goto done;
         audio = 1;
@@ -498,12 +532,19 @@ static int record_clip(struct capture_task *task)
             goto done;
         }
     }
+#else
+    if (boot_video) {
+        error = ENOTSUP;
+        goto done;
+    }
 #endif
     frame.frameBufLen = CVI_MBUF_STREAM_MAX_SIZE;
-    app_ipcam_Mbuf_ReadFrame(reader, 0, &frame, 0);
-    if (CVI_VENC_RequestIDR(encoder->VencChn, CVI_TRUE) != CVI_SUCCESS) {
-        error = EIO;
-        goto done;
+    if (!boot_video) {
+        app_ipcam_Mbuf_ReadFrame(reader, 0, &frame, 0);
+        if (CVI_VENC_RequestIDR(encoder->VencChn, CVI_TRUE) != CVI_SUCCESS) {
+            error = EIO;
+            goto done;
+        }
     }
     while (!capture_cancelled()) {
         struct timespec now;
@@ -517,11 +558,39 @@ static int record_clip(struct capture_task *task)
         if (error) {
             break;
         }
-        frame.frameBufLen = CVI_MBUF_STREAM_MAX_SIZE;
-        int received = app_ipcam_Mbuf_ReadFrame(reader, 0, &frame, 100);
-        if (received <= 0 || frame.frameParam.frameType == CVI_MEDIA_AFRAME_A) {
-            usleep(10 * 1000);
-            continue;
+        int received;
+#ifdef BF01_BOOT_CAPTURE
+        if (boot_video) {
+            struct bf01_video_frame boot_frame;
+            received = app_ipcam_BootVideo_ReadFrame(frame.frameBuf, CVI_MBUF_STREAM_MAX_SIZE,
+                &boot_frame, 100);
+            if (received == -EAGAIN) {
+                usleep(10 * 1000);
+                continue;
+            }
+            if (received == -ENODATA) {
+                error = EIO;
+                break;
+            }
+            if (received < 0) {
+                error = -received;
+                break;
+            }
+            frame.frameParam.frameLen = (unsigned int)received;
+            frame.frameParam.frameType = (boot_frame.flags & BF01_VIDEO_FLAG_KEY) ?
+                CVI_MEDIA_VFRAME_I : CVI_MEDIA_VFRAME_P;
+            frame.frameParam.frameCodec = PT_H265;
+            frame.frameParam.framePts = ((uint64_t)boot_frame.pts_high << 32) | boot_frame.pts_low;
+            frame.frameParam.frameIndex = boot_frame.sequence;
+        } else
+#endif
+        {
+            frame.frameBufLen = CVI_MBUF_STREAM_MAX_SIZE;
+            received = app_ipcam_Mbuf_ReadFrame(reader, 0, &frame, 100);
+            if (received <= 0 || frame.frameParam.frameType == CVI_MEDIA_AFRAME_A) {
+                usleep(10 * 1000);
+                continue;
+            }
         }
         if (!frame.frameParam.frameLen || frame.frameParam.frameLen > CVI_MBUF_STREAM_MAX_SIZE) {
             error = EIO;
@@ -537,7 +606,7 @@ static int record_clip(struct capture_task *task)
         if (!started) {
             firstPts = pts;
 #ifdef AUDIO_SUPPORT
-            if (audio) {
+            if (audio && !boot_video) {
                 CVI_U64 audioClock = 0;
                 if (CVI_SYS_GetCurPTS(&audioClock) != CVI_SUCCESS || audioClock > INT64_MAX || pts > INT64_MAX) {
                     error = EIO;
@@ -557,7 +626,8 @@ static int record_clip(struct capture_task *task)
                 if (!error && capture_cancelled())
                     error = ECANCELED;
                 if (!error)
-                    error = record_audio(output, audioClockOffset);
+                    error = record_audio(output, audioClockOffset, boot_video, firstPts,
+                        firstPts + (uint64_t)task->seconds * 1000000);
                 if (!error && monotonic_ms() >= deadline)
                     error = ETIMEDOUT;
                 if (error)
@@ -594,7 +664,7 @@ static int record_clip(struct capture_task *task)
             break;
         }
 #ifdef AUDIO_SUPPORT
-        if (audio && (error = record_audio(output, audioClockOffset)) != 0)
+        if (audio && (error = record_audio(output, audioClockOffset, boot_video, firstPts, pts)) != 0)
             break;
 #endif
         if (!started) {
@@ -619,8 +689,12 @@ static int record_clip(struct capture_task *task)
     if (!complete && !error)
         error = ECANCELED;
 done:
+#ifdef BF01_BOOT_CAPTURE
+    if (boot_video)
+        app_ipcam_BootVideo_Stop();
+#endif
 #ifdef AUDIO_SUPPORT
-    if (audio)
+    if (audio && !boot_video)
         app_ipcam_Audio_CaptureEnd();
 #else
     (void)audio;
@@ -709,23 +783,48 @@ static void *capture_boot_task(void *opaque)
     struct capture_task task = { .seconds = 10, .channel = 0, .started_ms = monotonic_ms() };
     int enabled;
     int error = 0;
+#ifdef BF01_BOOT_CAPTURE
+    int photos_saved = 0;
+    int transfer_error = 0;
+#endif
     (void)opaque;
     if (load_settings(&task, &enabled) != 0) {
         task_status(&task, "failed", EINVAL);
         return NULL;
     }
     if (!enabled) {
+#ifdef BF01_BOOT_CAPTURE
+        app_ipcam_BootVideo_Stop();
+#endif
         task_status(&task, "disabled", 0);
         return NULL;
     }
 #ifdef BF01_BOOT_CAPTURE
     task_status(&task, "receiving_rtos_photos", 0);
-    error = app_ipcam_BootCapture_Stage(&task.burst, capture_cancelled);
-    if (error) {
+    for (;;) {
+        if (capture_cancelled()) {
+            task_status(&task, "interrupted", ECANCELED);
+            return NULL;
+        }
+        error = app_ipcam_BootCapture_Stage(&task.burst, capture_cancelled);
+        if (!error)
+            break;
+        if (task.burst.state != BF01_BURST_FAILED &&
+            (error == ENOMEM || error == EAGAIN || error == ETIMEDOUT)) {
+            if (error != transfer_error) {
+                fprintf(stderr, "[boot-capture] RTOS transfer pending: error=%d; retaining photos and retrying\n", error);
+                task_status(&task, "receiving_rtos_photos", error);
+                transfer_error = error;
+            }
+            usleep(200 * 1000);
+            continue;
+        }
         fprintf(stderr, "[boot-capture] RTOS photo staging failed: %d; no Linux recapture\n", error);
-        task_status(&task, error == EALREADY ? "photos_already_saved" : "failed", error);
+        task_status(&task, error == EALREADY ? "photos_already_saved" :
+            error == ECANCELED ? "interrupted" : "failed", error);
         return NULL;
     }
+wait_for_storage:
 #endif
     task_status(&task, "waiting_for_storage", 0);
     while (app_ipcam_Storage_Acquire(&task.storage_generation) != 0) {
@@ -779,6 +878,7 @@ static void *capture_boot_task(void *opaque)
         error = EIO;
         goto failed;
     }
+    photos_saved = 1;
     error = app_ipcam_BootCapture_Commit(&task.burst);
     if (error)
         fprintf(stderr, "[boot-capture] SD photos saved; RTOS release not acknowledged: %d\n", error);
@@ -815,6 +915,24 @@ static void *capture_boot_task(void *opaque)
     }
     error = EIO;
 failed:
+#ifdef BF01_BOOT_CAPTURE
+    if (!photos_saved && !capture_cancelled() &&
+        (error == EIO || error == ENODEV || error == EROFS || error == ENOSPC)) {
+        fprintf(stderr, "[boot-capture] SD save pending: error=%d; retaining photos until storage is writable\n", error);
+        app_ipcam_Storage_ReportError(task.storage_generation, error);
+        app_ipcam_Storage_Release();
+        task.directory[0] = '\0';
+        task.photo[0] = '\0';
+        task.video[0] = '\0';
+        memset(task.photos, 0, sizeof(task.photos));
+        task.storage_ready_ms = 0;
+        task.photo_started_ms = 0;
+        task.photo_ready_ms = 0;
+        task_status(&task, "waiting_for_storage", error);
+        usleep(500 * 1000);
+        goto wait_for_storage;
+    }
+#endif
     task_status(&task, error == ECANCELED ? "interrupted" : "failed", error);
     app_ipcam_Storage_Release();
     return NULL;

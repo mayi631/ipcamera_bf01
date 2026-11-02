@@ -1,4 +1,5 @@
 #include "app_ipcam_preview.h"
+#include "app_ipcam_playback.h"
 
 #ifdef BF01_PREVIEW_SUPPORT
 #include <stdio.h>
@@ -232,6 +233,9 @@ int app_ipcam_Preview_Start(void)
     config.rtsp_port = rtsp->port;
     config.session = (unsigned int)session;
     config.video_ready = preview_video_ready;
+#ifdef BF01_AUDIO_DUPLEX
+    config.audio_control = app_ipcam_Playback_Control;
+#endif
     if (bf01_preview_start(&config) != 0) {
         app_ipcam_Preview_Stop();
         return -1;

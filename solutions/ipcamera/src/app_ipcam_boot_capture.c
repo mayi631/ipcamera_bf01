@@ -55,8 +55,12 @@ static int exchange(uint32_t command, uint32_t index, uint32_t offset, struct bf
         return ENODEV;
     for (unsigned int attempt = 0; attempt < 3; attempt++) {
         struct bf01_burst_request *request = CVI_IPCM_GetBuff(sizeof(*request));
-        if (!request)
-            return ENOMEM;
+        if (!request) {
+            if (attempt == 2)
+                return ENOMEM;
+            usleep(100 * 1000);
+            continue;
+        }
         pthread_mutex_lock(&reply_mutex);
         sequence++;
         received = 0;

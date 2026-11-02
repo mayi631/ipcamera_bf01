@@ -14,7 +14,7 @@ DEPS 	:= $(OBJS:%.o=%.d)
 #
 INCS	+= -I$(CURDIR)/include
 INCS += -I$(APP_PREBUILT_DIR)/ffmpeg/include
-LIBS += -Wl,-Bstatic -L$(FFMPEG_LIB_DIR) -lavformat -lavcodec -lavutil -Wl,-Bdynamic -lm
+LIBS += -Wl,-Bstatic -L$(FFMPEG_LIB_DIR) -lavformat -lavcodec -lswresample -lavutil -Wl,-Bdynamic -lm
 #
 CFLAGS += $(INCS)
 CXXFLAGS += $(INCS)

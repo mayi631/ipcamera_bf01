@@ -14,6 +14,7 @@ struct app_mp4 {
     uint64_t first_pts;
     uint64_t pending_pts;
     int header_written;
+    int hevc;
     AVCodecContext *audio_codec;
     AVStream *audio_stream;
     AVFrame *audio_frame;
@@ -42,7 +43,8 @@ static size_t next_nal(const unsigned char *data, size_t size, size_t offset, si
     return size;
 }
 
-static int inspect_frame(const unsigned char *data, size_t size, int *idr, unsigned char *extra, size_t *extra_size)
+static int inspect_frame(const unsigned char *data, size_t size, int hevc, int *idr,
+    unsigned char *extra, size_t *extra_size)
 {
     size_t prefix;
     size_t offset = next_nal(data, size, 0, &prefix);
@@ -57,29 +59,32 @@ static int inspect_frame(const unsigned char *data, size_t size, int *idr, unsig
             return -1;
         size_t following_prefix;
         size_t end = next_nal(data, size, payload + 1, &following_prefix);
-        unsigned int type = data[payload] & 31;
-        if (type == 5)
+        if (hevc && payload + 1 >= end)
+            return -1;
+        unsigned int type = hevc ? (data[payload] >> 1) & 63 : data[payload] & 31;
+        if (hevc ? (type >= 19 && type <= 21) : type == 5)
             *idr = 1;
-        if ((type == 7 || type == 8) && extra) {
+        if ((hevc ? (type >= 32 && type <= 34) : (type == 7 || type == 8)) && extra) {
             size_t length = end - payload;
             if (length > 4096 - 4 || *extra_size > 4096 - length - 4)
                 return -1;
             memcpy(extra + *extra_size, "\0\0\0\1", 4);
             memcpy(extra + *extra_size + 4, data + payload, length);
             *extra_size += length + 4;
-            parameters |= type == 7 ? 1 : 2;
+            parameters |= hevc ? 1 << (type - 32) : (type == 7 ? 1 : 2);
         }
         offset = end;
         prefix = following_prefix;
     }
-    return extra && parameters != 3 ? -1 : 0;
+    return extra && parameters != (hevc ? 7 : 3) ? -1 : 0;
 }
 
-struct app_mp4 *app_mp4_open(const char *path, unsigned int width, unsigned int height)
+static struct app_mp4 *open_video(const char *path, unsigned int width, unsigned int height, int hevc)
 {
     struct app_mp4 *muxer = calloc(1, sizeof(*muxer));
     if (!muxer)
         return NULL;
+    muxer->hevc = hevc;
     if (avformat_alloc_output_context2(&muxer->format, NULL, "mp4", path) < 0 || !muxer->format)
         goto failed;
     muxer->stream = avformat_new_stream(muxer->format, NULL);
@@ -89,7 +94,9 @@ struct app_mp4 *app_mp4_open(const char *path, unsigned int width, unsigned int 
     muxer->stream->time_base = (AVRational){1, 1000000};
     AVCodecParameters *codec = muxer->stream->codecpar;
     codec->codec_type = AVMEDIA_TYPE_VIDEO;
-    codec->codec_id = AV_CODEC_ID_H264;
+    codec->codec_id = hevc ? AV_CODEC_ID_HEVC : AV_CODEC_ID_H264;
+    if (hevc)
+        codec->codec_tag = MKTAG('h', 'v', 'c', '1');
     codec->width = (int)width;
     codec->height = (int)height;
     codec->video_delay = 0;
@@ -99,6 +106,16 @@ struct app_mp4 *app_mp4_open(const char *path, unsigned int width, unsigned int 
 failed:
     app_mp4_abort(muxer);
     return NULL;
+}
+
+struct app_mp4 *app_mp4_open(const char *path, unsigned int width, unsigned int height)
+{
+    return open_video(path, width, height, 0);
+}
+
+struct app_mp4 *app_mp4_open_h265(const char *path, unsigned int width, unsigned int height)
+{
+    return open_video(path, width, height, 1);
 }
 
 int app_mp4_enable_audio(struct app_mp4 *muxer, unsigned int sample_rate, unsigned int seconds)
@@ -184,7 +201,7 @@ int app_mp4_write_pcm(struct app_mp4 *muxer, const int16_t *samples, unsigned in
     if (first >= muxer->audio_limit)
         return 0;
     if (!muxer->audio_started) {
-        if (first > muxer->audio_codec->sample_rate / 4) {
+        if (first > 2) {
             fprintf(stderr, "[audio] first PCM arrives too late: offset_samples=%lld\n", (long long)first);
             return -1;
         }
@@ -230,6 +247,8 @@ static int finish_audio(struct app_mp4 *muxer)
         return 0;
     if (!app_mp4_audio_complete(muxer))
         return -1;
+    fprintf(stderr, "[audio] MP4 PCM complete: samples=%lld/%lld rate=%d\n",
+        (long long)muxer->audio_samples, (long long)muxer->audio_limit, muxer->audio_codec->sample_rate);
     if (muxer->audio_filled && send_audio(muxer) < 0)
         return -1;
     if (avcodec_send_frame(muxer->audio_codec, NULL) < 0)
@@ -256,7 +275,7 @@ int app_mp4_write(struct app_mp4 *muxer, const unsigned char *data, size_t size,
     size_t extra_size;
     if (!muxer || !data || !size || size > INT_MAX)
         return -1;
-    if (inspect_frame(data, size, &idr, muxer->header_written ? NULL : extra, &extra_size) != 0)
+    if (inspect_frame(data, size, muxer->hevc, &idr, muxer->header_written ? NULL : extra, &extra_size) != 0)
         return -1;
     if (!muxer->header_written) {
         if (!idr)

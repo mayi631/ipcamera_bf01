@@ -12,6 +12,7 @@
 #include "app_ipcam_capture.h"
 #include "app_ipcam_storage.h"
 #include "app_ipcam_boot_capture.h"
+#include "app_ipcam_playback.h"
 
 /**************************************************************************
  *                              M A C R O S                               *
@@ -104,8 +105,10 @@ static int app_ipcam_MiscThread_DeInit(void)
 
 static int app_ipcam_Exit(void)
 {
+    app_ipcam_Playback_Stop();
     app_ipcam_Capture_Stop();
 #ifdef BF01_BOOT_CAPTURE
+    app_ipcam_BootVideo_UnInit();
     app_ipcam_BootCapture_UnInit();
 #endif
     app_ipcam_Storage_Stop();
@@ -149,7 +152,7 @@ static int app_ipcam_Exit(void)
     #endif
     #endif
 
-    #ifdef AUDIO_SUPPORT
+    #if defined(AUDIO_SUPPORT) && !defined(BF01_BOOT_CAPTURE)
     APP_CHK_RET(app_ipcam_Audio_UnInit(), "Audio Stop");
     #endif
 
@@ -191,9 +194,10 @@ static int app_ipcam_Init(void)
     APP_CHK_RET(app_ipcam_MsgAnonInit(), "init MsgAnon");
     #endif
 
-    #ifdef BF01_BOOT_CAPTURE
+#ifdef BF01_BOOT_CAPTURE
     APP_CHK_RET(app_ipcam_BootCapture_Init(), "init RTOS boot capture receiver");
-    #endif
+    APP_CHK_RET(app_ipcam_BootVideo_Init(), "init RTOS boot video receiver");
+#endif
 
     APP_CHK_RET(app_ipcam_Peripheral_Init(), "Init Peripheral");
 
@@ -219,12 +223,16 @@ static int app_ipcam_Init(void)
     #endif
 
     #ifdef AUDIO_SUPPORT
+    #ifdef BF01_BOOT_CAPTURE
+    APP_PROF_LOG_PRINT(LEVEL_INFO, "RTOS owns MIC for the complete early video; Linux AI/AO disabled\n");
+    #else
     int audioResult = app_ipcam_Audio_Init();
     if (audioResult != CVI_SUCCESS) {
         if (!app_ipcam_Audio_Param_Get()->bCaptureOnly)
             return audioResult;
         APP_PROF_LOG_PRINT(LEVEL_ERROR, "MIC unavailable: %#x; preview and photo remain available, audio recording will report failure\n", audioResult);
     }
+    #endif
     #endif
 
     #ifdef CVI_UVC_SUPPORT
@@ -263,6 +271,9 @@ int main(int argc, char *argv[])
     sigset_t photoSignals;
     sigemptyset(&photoSignals);
     sigaddset(&photoSignals, SIGUSR1);
+#ifdef BF01_AUDIO_DUPLEX
+    sigaddset(&photoSignals, SIGUSR2);
+#endif
     sigaddset(&photoSignals, SIGINT);
     sigaddset(&photoSignals, SIGTERM);
     APP_CHK_RET(pthread_sigmask(SIG_BLOCK, &photoSignals, NULL), "block photo signal");
@@ -276,6 +287,11 @@ int main(int argc, char *argv[])
 
     /* init modules include <Peripheral; Sys; VI; VB; OSD; Venc; AI; Audio; etc.> */
     APP_CHK_RET(app_ipcam_Init(), "app_ipcam_Init");
+
+    #ifndef BF01_BOOT_CAPTURE
+    if (app_ipcam_Playback_Start() != 0)
+        fprintf(stderr, "[audio] playback unavailable; capture and preview remain enabled\n");
+    #endif
 
     /* create rtsp server */
     APP_CHK_RET(app_ipcam_Rtsp_Server_Create(), "create rtsp server");
@@ -351,6 +367,14 @@ int main(int argc, char *argv[])
                 app_ipcam_JpgCapFlag_Set(CVI_TRUE);
                 app_ipcam_Storage_Release();
             }
+#ifdef BF01_AUDIO_DUPLEX
+        } else if (receivedSignal == SIGUSR2) {
+            const char *prompt = getenv("BF01_AUDIO_PROMPT");
+            if (!prompt || !*prompt)
+                prompt = "/mnt/data/Button.wav";
+            int playbackResult = app_ipcam_Playback_Play(prompt);
+            fprintf(stderr, "[audio] local prompt request: file=%s result=%d\n", prompt, playbackResult);
+#endif
         } else if (receivedSignal == SIGINT || receivedSignal == SIGTERM) {
             return app_ipcam_Exit();
         } else if (receivedSignal < 0 && signalError != EAGAIN && signalError != EINTR) {

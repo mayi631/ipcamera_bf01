@@ -52,7 +52,7 @@
 static CVI_BOOL MP3_RUNNING = CVI_FALSE;
 
 APP_PARAM_AUDIO_CFG_T g_stAudioCfg = {
-#ifdef BF01_MIC_ONLY
+#ifdef BF01_AUDIO_DUPLEX
     .bCaptureOnly = true,
 #endif
 };
@@ -60,7 +60,7 @@ APP_PARAM_AUDIO_CFG_T *g_pstAudioCfg = &g_stAudioCfg;
 
 void app_ipcam_Audio_ApplyCapturePolicy(APP_PARAM_AUDIO_CFG_T *parameters)
 {
-#ifdef BF01_MIC_ONLY
+#ifdef BF01_AUDIO_DUPLEX
     parameters->bCaptureOnly = true;
     parameters->astAudioIntercom.bEnable = false;
     APP_AUDIO_CFG_S *config = &parameters->astAudioCfg;
@@ -89,9 +89,9 @@ void app_ipcam_Audio_ApplyCapturePolicy(APP_PARAM_AUDIO_CFG_T *parameters)
 #endif
 }
 
-int app_ipcam_Audio_SpeakerDisable(void)
+int app_ipcam_Audio_SpeakerSet(int enabled)
 {
-#ifdef BF01_MIC_ONLY
+#ifdef BF01_AUDIO_DUPLEX
     char path[80];
     snprintf(path, sizeof(path), "/sys/class/gpio/gpio%d/direction", SPEAKER_GPIO);
     if (access(path, F_OK) != 0) {
@@ -109,14 +109,23 @@ int app_ipcam_Audio_SpeakerDisable(void)
     int directionFd = open(path, O_WRONLY);
     if (directionFd < 0)
         return -errno;
-    int result = write(directionFd, "low", 3);
-    int error = result < 0 ? errno : (result != 3 ? EIO : 0);
+    const char *level = enabled ? "high" : "low";
+    int length = strlen(level);
+    int result = write(directionFd, level, length);
+    int error = result < 0 ? errno : (result != length ? EIO : 0);
     close(directionFd);
     if (error)
         return -error;
-    APP_PROF_LOG_PRINT(LEVEL_INFO, "BF01 speaker disabled: GPIOA15 low; MIC capture only\n");
+    APP_PROF_LOG_PRINT(LEVEL_INFO, "BF01 speaker %s: GPIOA15\n", enabled ? "enabled" : "disabled");
+#else
+    (void)enabled;
 #endif
     return 0;
+}
+
+int app_ipcam_Audio_SpeakerDisable(void)
+{
+    return app_ipcam_Audio_SpeakerSet(0);
 }
 
 static RUN_THREAD_PARAM mAudioAiThread;

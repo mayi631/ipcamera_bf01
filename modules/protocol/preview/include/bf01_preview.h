@@ -7,6 +7,7 @@ struct bf01_preview_config {
     unsigned short rtsp_port;
     unsigned int session;
     int (*video_ready)(void *opaque);
+    void (*audio_control)(const char *query, char *response, unsigned int size);
     void *opaque;
 };
 

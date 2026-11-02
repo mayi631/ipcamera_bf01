@@ -125,6 +125,7 @@ APP_PARAM_AUDIO_CFG_T *app_ipcam_Audio_Param_Get(void);
 
 void app_ipcam_Audio_ApplyCapturePolicy(APP_PARAM_AUDIO_CFG_T *parameters);
 int app_ipcam_Audio_SpeakerDisable(void);
+int app_ipcam_Audio_SpeakerSet(int enabled);
 int app_ipcam_Audio_Init(void);
 int app_ipcam_Audio_UnInit(void);
 int app_ipcam_Audio_CaptureInit(void);

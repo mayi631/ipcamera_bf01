@@ -3,6 +3,7 @@
 
 #ifdef BF01_BOOT_CAPTURE
 #include "bf01_boot_capture.h"
+#include "app_ipcam_boot_video.h"
 
 #ifndef APP_BOOT_CAPTURE_DIR
 #define APP_BOOT_CAPTURE_DIR "/run/ipcamera-burst"

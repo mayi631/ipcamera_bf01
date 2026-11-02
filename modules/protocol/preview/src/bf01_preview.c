@@ -205,7 +205,11 @@ static void handle_http(struct preview_client *client, int video_ready)
         return;
     }
     command = target + 5;
-    if (!strcasecmp(command, "getproductinfo")) {
+    if (!strcasecmp(command, "audio") && settings.audio_control) {
+        char response[512];
+        settings.audio_control(query, response, sizeof(response));
+        queue_json(client, response);
+    } else if (!strcasecmp(command, "getproductinfo")) {
         queue_json(client, "{\"result\":0,\"info\":{\"model\":\"cardv\","
             "\"company\":\"sophgo\",\"soc\":\"sophgo\",\"sp\":\"cv\"}}");
     } else if (!strcasecmp(command, "capability")) {
