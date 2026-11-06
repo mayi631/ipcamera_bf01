@@ -25,6 +25,13 @@ install:
 	@mkdir -p $(APP_INSTALL_DIR)/rawimages
 	@cp -rf $(TARGET) $(APP_INSTALL_DIR)
 	@install -m 600 $(APP_RESOURCE_DIR)/preview/capture.ini $(APP_INSTALL_DIR)/capture.ini
+ifeq ($(CONFIG_RESOURCE_INSTALL_FBM_CV1815JA_BF01_GC4683),y)
+	@install -m 600 $(APP_RESOURCE_DIR)/preview/boot_ai.ini $(APP_INSTALL_DIR)/boot_ai.ini
+	@install -m 644 $(SRCTREE)/ai_model/yolov5s_cv181x_bf16.cvimodel $(APP_INSTALL_DIR)/yolov5s_cv181x_bf16.cvimodel
+	@mkdir -p $(APP_INSTALL_DIR)/lib
+	@install -m 755 $(TOP_DIR)/install/soc_cv1815ja_bf01_spinand/tpu_32bit/cvitek_tpu_sdk/lib/libcviruntime.so $(APP_INSTALL_DIR)/lib/
+	@install -m 755 $(TOP_DIR)/install/soc_cv1815ja_bf01_spinand/tpu_32bit/cvitek_tpu_sdk/lib/libcvikernel.so $(APP_INSTALL_DIR)/lib/
+endif
 ifeq ($(CONFIG_MODULE_PREVIEW),y)
 	@install -m 755 $(TARGET_OUT_DIR)/bin/bf01_atbm_ap $(APP_INSTALL_DIR)/bf01_atbm_ap
 	@install -m 755 $(APP_RESOURCE_DIR)/preview/bf01-preview $(APP_INSTALL_DIR)/bf01-preview

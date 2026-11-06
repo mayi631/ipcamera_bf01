@@ -49,16 +49,21 @@ static int receive_reply(void *private_data, IPCM_ANON_MSG_S *message)
     return 0;
 }
 
-static int exchange(uint32_t command, uint32_t index, uint32_t offset, struct bf01_burst_reply *reply)
+static int exchange(uint32_t command, uint32_t index, uint32_t offset,
+    struct bf01_burst_reply *reply, uint64_t expires_ms)
 {
     if (!initialized)
         return ENODEV;
     for (unsigned int attempt = 0; attempt < 3; attempt++) {
+        uint64_t current_ms = now_ms();
+        if (current_ms >= expires_ms)
+            return ETIMEDOUT;
         struct bf01_burst_request *request = CVI_IPCM_GetBuff(sizeof(*request));
         if (!request) {
             if (attempt == 2)
                 return ENOMEM;
-            usleep(100 * 1000);
+            uint64_t remaining_ms = expires_ms - current_ms;
+            usleep((remaining_ms < 100 ? remaining_ms : 100) * 1000);
             continue;
         }
         pthread_mutex_lock(&reply_mutex);
@@ -74,9 +79,17 @@ static int exchange(uint32_t command, uint32_t index, uint32_t offset, struct bf
             CVI_IPCM_ReleaseBuff(request);
             return EIO;
         }
+        current_ms = now_ms();
+        if (current_ms >= expires_ms)
+            return ETIMEDOUT;
+        uint64_t wait_ms = expires_ms - current_ms;
+        if (wait_ms > 1000)
+            wait_ms = 1000;
         struct timespec deadline;
         clock_gettime(CLOCK_REALTIME, &deadline);
-        deadline.tv_sec++;
+        deadline.tv_nsec += (long)wait_ms * 1000000L;
+        deadline.tv_sec += deadline.tv_nsec / 1000000000L;
+        deadline.tv_nsec %= 1000000000L;
         pthread_mutex_lock(&reply_mutex);
         while (!received) {
             result = pthread_cond_timedwait(&reply_condition, &reply_mutex, &deadline);
@@ -130,7 +143,8 @@ int app_ipcam_BootCapture_Ready(void)
     return ready;
 }
 
-static int stage_image(unsigned int index, const struct bf01_burst_reply *metadata, int (*cancelled)(void))
+static int stage_image(unsigned int index, const struct bf01_burst_reply *metadata,
+    int (*cancelled)(void), uint64_t deadline)
 {
     const struct bf01_burst_image *image = &metadata->images[index];
     if (image->size < 4 || image->size > BF01_BURST_MAX_JPEG)
@@ -150,8 +164,12 @@ static int stage_image(unsigned int index, const struct bf01_burst_reply *metada
             error = ECANCELED;
             break;
         }
+        if (now_ms() >= deadline) {
+            error = ETIMEDOUT;
+            break;
+        }
         struct bf01_burst_reply reply;
-        error = exchange(BF01_BURST_READ, index, offset, &reply);
+        error = exchange(BF01_BURST_READ, index, offset, &reply, deadline);
         if (error)
             break;
         uint32_t remaining = image->size - offset;
@@ -207,7 +225,7 @@ int app_ipcam_BootCapture_Stage(struct bf01_burst_reply *metadata, int (*cancell
     for (;;) {
         if (cancelled())
             return ECANCELED;
-        int error = exchange(BF01_BURST_STATUS, 0, 0, metadata);
+        int error = exchange(BF01_BURST_STATUS, 0, 0, metadata, deadline);
         if (error)
             return error;
         if (metadata->state == BF01_BURST_RELEASED)
@@ -223,7 +241,7 @@ int app_ipcam_BootCapture_Stage(struct bf01_burst_reply *metadata, int (*cancell
     if (!metadata->count || metadata->count > BF01_BURST_COUNT)
         return EPROTO;
     for (unsigned int index = 0; index < metadata->count; index++) {
-        int error = stage_image(index, metadata, cancelled);
+        int error = stage_image(index, metadata, cancelled, deadline);
         if (error)
             return error;
         fprintf(stderr, "[boot-capture] staged photo=%u bytes=%u RTOS_ms=%u\n",
@@ -242,7 +260,7 @@ int app_ipcam_BootCapture_Commit(const struct bf01_burst_reply *metadata)
     for (unsigned int index = 0; index < metadata->count; index++)
         crc ^= metadata->images[index].crc;
     struct bf01_burst_reply reply;
-    int error = exchange(BF01_BURST_COMMIT, 0, crc, &reply);
+    int error = exchange(BF01_BURST_COMMIT, 0, crc, &reply, now_ms() + 3000);
     if (!error && reply.state != BF01_BURST_RELEASED)
         error = EPROTO;
     if (!error) {

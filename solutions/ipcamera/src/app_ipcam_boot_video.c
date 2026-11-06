@@ -56,6 +56,7 @@ static int receive_reply(void *private_data, IPCM_ANON_MSG_S *message)
 
 static int exchange_locked(uint32_t command, struct bf01_video_reply *reply, int timeout_ms)
 {
+    memset(reply, 0, sizeof(*reply));
     if (!initialized)
         return ENODEV;
     struct bf01_video_request *request = CVI_IPCM_GetBuff(sizeof(*request));
@@ -230,9 +231,14 @@ int app_ipcam_BootVideo_ReadFrame(unsigned char *buffer, size_t capacity,
         uint32_t oldest = ring->oldest_sequence;
         uint32_t newest = ring->write_sequence;
         if (!have_next_frame) {
-            int result = find_first_keyframe(oldest, newest);
-            if (!result && oldest)
-                fprintf(stderr, "[boot-video] cache overrun before attach: first retained keyframe=%u\n", next_frame);
+            if (oldest) {
+                __sync_synchronize();
+                if (*(volatile uint32_t *)&ring->generation != generation)
+                    goto waiting;
+                fprintf(stderr, "[boot-video] cache overrun before attach: oldest=%u; refusing incomplete startup video\n", oldest);
+                return -EOVERFLOW;
+            }
+            find_first_keyframe(oldest, newest);
         }
         if (have_next_frame && next_frame < oldest) {
             fprintf(stderr, "[boot-video] reader overrun: wanted=%u oldest=%u\n", next_frame, oldest);
@@ -324,18 +330,23 @@ int app_ipcam_BootVideo_ReadAudio(int16_t *samples, size_t capacity,
     return -EAGAIN;
 }
 
+static int stopped_reply(const struct bf01_video_reply *reply)
+{
+    return reply->magic == BF01_VIDEO_MAGIC && reply->version == BF01_VIDEO_VERSION &&
+        (reply->state == BF01_VIDEO_READY || reply->state == BF01_VIDEO_FAILED ||
+            reply->state == BF01_VIDEO_RELEASED);
+}
+
 void app_ipcam_BootVideo_Stop(void)
 {
     if (!initialized)
         return;
     struct bf01_video_reply response_for_stop;
-    int result = exchange(BF01_VIDEO_STOP, &response_for_stop, 200);
+    exchange(BF01_VIDEO_STOP, &response_for_stop, 200);
     uint64_t deadline = monotonic_ms() + 5000;
-    while ((result || (response_for_stop.state != BF01_VIDEO_READY &&
-        response_for_stop.state != BF01_VIDEO_FAILED && response_for_stop.state != BF01_VIDEO_RELEASED)) &&
-        monotonic_ms() < deadline) {
+    while (!stopped_reply(&response_for_stop) && monotonic_ms() < deadline) {
         usleep(20 * 1000);
-        result = exchange(BF01_VIDEO_STATUS, &response_for_stop, 200);
+        exchange(BF01_VIDEO_STATUS, &response_for_stop, 200);
     }
     if (ring) {
         CVI_SYS_Munmap(ring, ring_size);
@@ -345,8 +356,7 @@ void app_ipcam_BootVideo_Stop(void)
         have_next_frame = 0;
         have_next_audio = 0;
     }
-    if (!result && (response_for_stop.state == BF01_VIDEO_READY ||
-        response_for_stop.state == BF01_VIDEO_FAILED || response_for_stop.state == BF01_VIDEO_RELEASED))
+    if (stopped_reply(&response_for_stop))
         exchange(BF01_VIDEO_RELEASE, &response_for_stop, 200);
     else
         fprintf(stderr, "[boot-video] stop not acknowledged; bounded RTOS cache retained\n");

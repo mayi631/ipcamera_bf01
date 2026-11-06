@@ -1,5 +1,9 @@
 # BF01 拍照、MP4 录像与远程网络预览
 
+2026-11-05 新增大核优先识别门控：小核准备 640×640 帧，大核 TPU 判定通过后才允许
+原拍录落盘流程继续；失败或超时停录、不落盘。当前版本以 `BF01_BOOT_AI_GUIDE.md`
+中的流程、内存安全前提及 `completed` 状态为准，本文旧 `awaiting_ai` 描述保留作历史记录。
+
 统一相机入口为编译生成的 `ipcamera`。网络预览服务运行在该进程内，默认由它启动 AP 网络辅助进程；辅助进程不再启动相机。不要另起第二个 `ipcamera`，也不需要先启动 `bf01-preview`。单实例锁拒绝重复启动，退出相机时停止所属网络辅助进程并恢复 STA。
 
 网络控制协议只实现 live preview：沿用 BF01 已有 VENC/RTSP 码流，通过 JL25 风格控制接口返回预览地址；不增加远程拍照、录像、回放或配置类接口。应用新增启动后自动拍照、录制 MP4 并保存待识别任务的流程；原有 SIGUSR1 手动拍照入口保留。默认开机启动相机并完成本地采集，但不接管 Wi-Fi；不改 SDK 的 `S99user`、无线驱动或 GPIO。
@@ -156,7 +160,7 @@ pack_rootfs
 pack_upgrade
 ```
 
-`make pack_data` 会把 `ipcamera_bf01/install/` 安装到 `install/soc_cv1815ja_bf01_spinand/data/` 并调用 SDK 的 `pack_data`；板端由现有 `S99user` 执行 `/mnt/data/auto.sh`，无需手工修改生成后的 rootfs。SDK 生成的 `upgrade.zip` 按原有烧录/升级流程写入设备。
+`make pack_data` 会把 `ipcamera_bf01/install/` 安装到 `install/soc_cv1815ja_bf01_spinand/data/` 并调用 SDK 的 `pack_data`；板端由现有 `S99user` 执行 `/mnt/data/auto.sh`，无需手工修改生成后的 rootfs。若使用 `build_cvitek.sh pack_data`，脚本会在更新 data 分区后自动重新生成 `upgrade.zip`，避免升级包继续使用旧的 `data.spinand`。
 
 默认上电启动相机完成拍照和 MP4 录像，网络辅助模式为 `off`，随包包含上述联调用 AP 配置。确认手机连接和预览正常后，可保存 `ap` 或 `sta` 开机网络模式；相机自动采集不依赖网络连接。本次只改应用；如果此前已验证 4M JPEG pipeline，不需要为本次 MP4 流程重编 RTOS。
 

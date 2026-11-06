@@ -205,9 +205,10 @@ int app_ipcam_Preview_Start(void)
     APP_VENC_CHN_CFG_S *encoder;
     struct bf01_preview_config config;
     const char *session_text;
+    const char *mode = getenv("BF01_WIFI_MODE");
     char *end;
     long session = 1;
-    if (!app_ipcam_Preview_Enabled())
+    if (!app_ipcam_Preview_Enabled() || (mode && !strcmp(mode, "off")))
         return 0;
     rtsp = app_ipcam_Rtsp_Param_Get();
     session_text = getenv("BF01_PREVIEW_SESSION");

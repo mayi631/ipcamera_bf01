@@ -31,3 +31,4 @@ cd "$SDK_PATH"
 source build/envsetup_soc.sh
 defconfig "$BOARD"
 pack_data
+pack_upgrade

@@ -11,6 +11,14 @@ endif
 ODIR 	+= $(CURDIR)/obj
 OBJS 	:= $(SRCS:$(SDIR)/%.c=$(ODIR)/%.$(TARGET_MACHINE).$(SOC_NICK_NAME_LOWER).o)
 DEPS 	:= $(OBJS:%.o=%.d)
+BF01_BOOT_AI_TEST_INPUT ?= 0
+ifneq ($(BF01_BOOT_AI_TEST_INPUT),0)
+ifneq ($(BF01_BOOT_AI_TEST_INPUT),1)
+  $(error BF01_BOOT_AI_TEST_INPUT must be 0 or 1)
+endif
+endif
+BOOT_AI_OBJECT := $(ODIR)/app_ipcam_boot_ai.$(TARGET_MACHINE).$(SOC_NICK_NAME_LOWER).o
+BOOT_AI_MODE := $(ODIR)/.boot-ai-input-mode.$(TARGET_MACHINE).$(SOC_NICK_NAME_LOWER)
 #
 INCS	+= -I$(CURDIR)/include
 INCS += -I$(APP_PREBUILT_DIR)/ffmpeg/include
@@ -40,12 +48,22 @@ SUBDIRS := \
 #
 all : $(SUBDIRS) $(TARGET)
 
+$(BOOT_AI_OBJECT): CFLAGS += -DBF01_BOOT_AI_TEST_INPUT=$(BF01_BOOT_AI_TEST_INPUT)
+
 $(SUBDIRS) :
 	$(MAKE) -C $@ $(MAKECMDGOALS)
 
 $(ODIR)/%.$(TARGET_MACHINE).$(SOC_NICK_NAME_LOWER).o : $(SDIR)/%.c $(SRCTREE)/.config $(SRCTREE)/build/dep.mk
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(CC) $(CFLAGS) -o $@ -c $<
+
+$(BOOT_AI_OBJECT): $(BOOT_AI_MODE)
+
+$(BOOT_AI_MODE): FORCE_BOOT_AI_MODE
+	$(Q)mkdir -p $(dir $@)
+	$(Q)printf '%s\n' '$(BF01_BOOT_AI_TEST_INPUT)' | cmp -s - $@ || printf '%s\n' '$(BF01_BOOT_AI_TEST_INPUT)' > $@
+
+.PHONY: FORCE_BOOT_AI_MODE
 
 # Build the module libraries before linking, including incremental builds.
 $(TARGET) : $(SUBDIRS) $(OBJS)

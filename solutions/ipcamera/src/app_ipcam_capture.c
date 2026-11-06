@@ -19,6 +19,7 @@
 #include "app_ipcam_mp4.h"
 #include "app_ipcam_storage.h"
 #include "app_ipcam_boot_capture.h"
+#include "app_ipcam_boot_ai.h"
 #include "app_ipcam_paramparse.h"
 #include "cvi_mbuf.h"
 #include "minIni.h"
@@ -100,6 +101,30 @@ static int parse_number(const char *text, int minimum, int maximum, int *value)
         return -1;
     *value = (int)number;
     return 0;
+}
+
+static int resolve_capture_config(char *config, size_t capacity)
+{
+    if (!config || capacity == 0)
+        return -1;
+    int length = snprintf(config, capacity, "%s/capture.ini", CAPTURE_CFG);
+    if (length < 0 || (size_t)length >= capacity)
+        return -1;
+    if (access(config, F_OK) == 0)
+        return 0;
+    if (errno != ENOENT)
+        return -1;
+    ssize_t link_length = readlink("/proc/self/exe", config, capacity - 1);
+    if (link_length <= 0 || (size_t)link_length >= capacity - 1)
+        return -1;
+    config[link_length] = '\0';
+    char *name = strrchr(config, '/');
+    if (!name || (size_t)(name - config) + sizeof("/capture.ini") > capacity)
+        return -1;
+    strcpy(name, "/capture.ini");
+    if (access(config, F_OK) == 0)
+        return 0;
+    return errno == ENOENT ? 1 : -1;
 }
 
 static int sync_directory(const char *path)
@@ -319,7 +344,11 @@ static int update_status(const struct capture_task *task, const char *state, int
         "photo_ready_uptime_ms=%llu\nrecording_started_uptime_ms=%llu\ncompleted_uptime_ms=%llu\n"
         "recorded_ms=%llu\nvideo_bytes=%llu\nelapsed_ms=%llu\n",
         state, error, task->seconds, task->channel, task->directory, task->photo, task->video,
+#ifdef BF01_BOOT_CAPTURE
+        app_ipcam_BootAi_Allowed() ? "passed" : "not_submitted",
+#else
         !strcmp(state, "awaiting_ai") ? "pending" : "not_submitted",
+#endif
         (unsigned long long)task->started_ms, (unsigned long long)task->storage_ready_ms,
         (unsigned long long)photoElapsed, (unsigned long long)task->photo_ready_ms,
         (unsigned long long)task->recording_started_ms, (unsigned long long)task->completed_ms,
@@ -350,7 +379,7 @@ static int update_status(const struct capture_task *task, const char *state, int
             result = -1;
         }
     }
-    if (result != 0 && !strcmp(state, "awaiting_ai"))
+    if (result != 0 && (!strcmp(state, "awaiting_ai") || !strcmp(state, "completed")))
         return -1;
     if (save_file(CAPTURE_RUN "/status.ini", text) != 0) {
         fprintf(stderr, "[capture] cannot save runtime status\n");
@@ -371,20 +400,10 @@ static int task_status(const struct capture_task *task, const char *state, int e
 static int load_settings(struct capture_task *task, int *enabled)
 {
     char config[PATH_MAX];
-    strcpy(config, CAPTURE_CFG "/capture.ini");
-    if (access(config, F_OK) != 0) {
-        if (errno != ENOENT)
-            return -1;
-        ssize_t length = readlink("/proc/self/exe", config, sizeof(config) - 1);
-        if (length <= 0 || (size_t)length >= sizeof(config) - 1)
-            return -1;
-        config[length] = '\0';
-        char *name = strrchr(config, '/');
-        if (!name || (size_t)(name - config) + sizeof("/capture.ini") > sizeof(config))
-            return -1;
-        strcpy(name, "/capture.ini");
-    }
-    if (access(config, F_OK) != 0 && errno == ENOENT) {
+    int config_result = resolve_capture_config(config, sizeof(config));
+    if (config_result < 0)
+        return -1;
+    if (config_result > 0) {
         *enabled = 1;
         task->seconds = 10;
         task->channel = 0;
@@ -403,6 +422,25 @@ static int load_settings(struct capture_task *task, int *enabled)
     return parse_number(text, 0, 2, &task->channel);
 }
 
+int app_ipcam_Capture_LoadAiEnabled(int *enabled)
+{
+    if (!enabled)
+        return -1;
+    char config[PATH_MAX];
+    int config_result = resolve_capture_config(config, sizeof(config));
+    if (config_result < 0)
+        return -1;
+    if (config_result > 0) {
+        *enabled = 1;
+        return 0;
+    }
+    if (access(config, R_OK) != 0)
+        return -1;
+    char text[32];
+    ini_gets("capture", "ai_enabled", "1", text, sizeof(text), config);
+    return parse_number(text, 0, 1, enabled);
+}
+
 int app_ipcam_Capture_Configure(const char *seconds, const char *channel)
 {
     int duration;
@@ -418,7 +456,11 @@ int app_ipcam_Capture_Configure(const char *seconds, const char *channel)
         return -1;
     }
     char text[128];
-    snprintf(text, sizeof(text), "[capture]\nenabled=1\nduration_seconds=%d\nchannel=%d\n", duration, selected);
+    int ai_enabled = 1;
+    if (app_ipcam_Capture_LoadAiEnabled(&ai_enabled) != 0)
+        ai_enabled = 1;
+    snprintf(text, sizeof(text), "[capture]\nenabled=1\nai_enabled=%d\nduration_seconds=%d\nchannel=%d\n",
+        ai_enabled, duration, selected);
     if (save_file(CAPTURE_CFG "/capture.ini", text) != 0)
         return -1;
     printf("[capture] saved duration=%ds channel=%d; applies on the next application start\n", duration, selected);
@@ -785,10 +827,19 @@ static void *capture_boot_task(void *opaque)
     int error = 0;
 #ifdef BF01_BOOT_CAPTURE
     int photos_saved = 0;
-    int transfer_error = 0;
 #endif
     (void)opaque;
+#ifdef BF01_BOOT_CAPTURE
+    if (!app_ipcam_BootAi_Allowed()) {
+        app_ipcam_BootVideo_Stop();
+        task_status(&task, "ai_gate_closed", EPERM);
+        return NULL;
+    }
+#endif
     if (load_settings(&task, &enabled) != 0) {
+#ifdef BF01_BOOT_CAPTURE
+        app_ipcam_BootVideo_Stop();
+#endif
         task_status(&task, "failed", EINVAL);
         return NULL;
     }
@@ -801,24 +852,9 @@ static void *capture_boot_task(void *opaque)
     }
 #ifdef BF01_BOOT_CAPTURE
     task_status(&task, "receiving_rtos_photos", 0);
-    for (;;) {
-        if (capture_cancelled()) {
-            task_status(&task, "interrupted", ECANCELED);
-            return NULL;
-        }
-        error = app_ipcam_BootCapture_Stage(&task.burst, capture_cancelled);
-        if (!error)
-            break;
-        if (task.burst.state != BF01_BURST_FAILED &&
-            (error == ENOMEM || error == EAGAIN || error == ETIMEDOUT)) {
-            if (error != transfer_error) {
-                fprintf(stderr, "[boot-capture] RTOS transfer pending: error=%d; retaining photos and retrying\n", error);
-                task_status(&task, "receiving_rtos_photos", error);
-                transfer_error = error;
-            }
-            usleep(200 * 1000);
-            continue;
-        }
+    error = app_ipcam_BootCapture_Stage(&task.burst, capture_cancelled);
+    if (error) {
+        app_ipcam_BootVideo_Stop();
         fprintf(stderr, "[boot-capture] RTOS photo staging failed: %d; no Linux recapture\n", error);
         task_status(&task, error == EALREADY ? "photos_already_saved" :
             error == ECANCELED ? "interrupted" : "failed", error);
@@ -829,12 +865,18 @@ wait_for_storage:
     task_status(&task, "waiting_for_storage", 0);
     while (app_ipcam_Storage_Acquire(&task.storage_generation) != 0) {
         if (capture_cancelled()) {
+#ifdef BF01_BOOT_CAPTURE
+            app_ipcam_BootVideo_Stop();
+#endif
             task_status(&task, "interrupted", ECANCELED);
             return NULL;
         }
         usleep(200 * 1000);
     }
     if (capture_cancelled()) {
+#ifdef BF01_BOOT_CAPTURE
+        app_ipcam_BootVideo_Stop();
+#endif
         task_status(&task, "interrupted", ECANCELED);
         app_ipcam_Storage_Release();
         return NULL;
@@ -909,7 +951,12 @@ wait_for_storage:
     error = record_clip(&task);
     if (error)
         goto failed;
-    if (task_status(&task, "awaiting_ai", 0) == 0) {
+#ifdef BF01_BOOT_CAPTURE
+    const char *completed_state = "completed";
+#else
+    const char *completed_state = "awaiting_ai";
+#endif
+    if (task_status(&task, completed_state, 0) == 0) {
         app_ipcam_Storage_Release();
         return NULL;
     }
@@ -932,6 +979,9 @@ failed:
         usleep(500 * 1000);
         goto wait_for_storage;
     }
+#endif
+#ifdef BF01_BOOT_CAPTURE
+    app_ipcam_BootVideo_Stop();
 #endif
     task_status(&task, error == ECANCELED ? "interrupted" : "failed", error);
     app_ipcam_Storage_Release();

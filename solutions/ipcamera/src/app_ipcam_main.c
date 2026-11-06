@@ -12,6 +12,7 @@
 #include "app_ipcam_capture.h"
 #include "app_ipcam_storage.h"
 #include "app_ipcam_boot_capture.h"
+#include "app_ipcam_boot_ai.h"
 #include "app_ipcam_playback.h"
 
 /**************************************************************************
@@ -188,15 +189,12 @@ static int app_ipcam_Exit(void)
 
 static int app_ipcam_Init(void)
 {
+#ifndef BF01_BOOT_CAPTURE
     APP_CHK_RET(app_ipcam_Msg_Init(), "init Msg failed");
 
     #ifdef ANONMSG_ENABLE
     APP_CHK_RET(app_ipcam_MsgAnonInit(), "init MsgAnon");
     #endif
-
-#ifdef BF01_BOOT_CAPTURE
-    APP_CHK_RET(app_ipcam_BootCapture_Init(), "init RTOS boot capture receiver");
-    APP_CHK_RET(app_ipcam_BootVideo_Init(), "init RTOS boot video receiver");
 #endif
 
     APP_CHK_RET(app_ipcam_Peripheral_Init(), "Init Peripheral");
@@ -254,6 +252,10 @@ static int app_ipcam_Init(void)
 
 int main(int argc, char *argv[])
 {
+#ifdef BF01_BOOT_CAPTURE
+    if (argc == 2 && !strcmp(argv[1], "--boot-ai-worker"))
+        return app_ipcam_BootAi_Worker();
+#endif
     if (argc > 1 && !strcmp(argv[1], "--capture-config")) {
         if (argc != 4) {
             fprintf(stderr, "Usage: ipcamera --capture-config SECONDS(1-300) CHANNEL(0-2)\n");
@@ -277,6 +279,25 @@ int main(int argc, char *argv[])
     sigaddset(&photoSignals, SIGINT);
     sigaddset(&photoSignals, SIGTERM);
     APP_CHK_RET(pthread_sigmask(SIG_BLOCK, &photoSignals, NULL), "block photo signal");
+
+#ifdef BF01_BOOT_CAPTURE
+    int boot_ai_enabled = 1;
+    APP_CHK_RET(app_ipcam_Capture_LoadAiEnabled(&boot_ai_enabled), "load boot AI switch");
+    fprintf(stderr, "[boot-ai] recognition=%s\n", boot_ai_enabled ? "enabled" : "disabled");
+    APP_CHK_RET(app_ipcam_Msg_Init(), "init early Msg");
+    APP_CHK_RET(app_ipcam_MsgAnonInit(), "init early MsgAnon");
+    APP_CHK_RET(app_ipcam_BootCapture_Init(), "init early RTOS capture receiver");
+    APP_CHK_RET(app_ipcam_BootVideo_Init(), "init early RTOS video receiver");
+    int gate_result = boot_ai_enabled ? app_ipcam_BootAi_Run() : app_ipcam_BootAi_Bypass();
+    if (gate_result) {
+        fprintf(stderr, "[boot-ai] gate closed: error=%d; stop recording, no SD media writes\n", gate_result);
+        app_ipcam_BootVideo_UnInit();
+        app_ipcam_BootCapture_UnInit();
+        app_ipcam_MsgAnonDeInit();
+        app_ipcam_Msg_Deinit();
+        return gate_result == ENODATA ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
+#endif
 
     APP_CHK_RET(app_ipcam_Preview_Prepare(), "prepare integrated camera network");
 

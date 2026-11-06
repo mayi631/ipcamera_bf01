@@ -4,5 +4,6 @@
 int app_ipcam_Capture_Start(void);
 void app_ipcam_Capture_Stop(void);
 int app_ipcam_Capture_Configure(const char *seconds, const char *channel);
+int app_ipcam_Capture_LoadAiEnabled(int *enabled);
 
 #endif
