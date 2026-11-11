@@ -13,6 +13,7 @@
 #include "app_ipcam_storage.h"
 #include "app_ipcam_boot_capture.h"
 #include "app_ipcam_boot_ai.h"
+#include "app_ipcam_boot_timestamp.h"
 #include "app_ipcam_playback.h"
 
 /**************************************************************************
@@ -66,6 +67,9 @@ static int app_ipcam_Peripheral_UnInit(void)
 static void *ThreadMisc(void *arg)
 {
     while (g_bMisc) {
+        #ifdef BF01_BOOT_CAPTURE
+        app_ipcam_BootTimestampPoll();
+        #endif
         #ifdef WEB_SOCKET
         if (!app_ipcam_Preview_Enabled()) {
             app_ipcam_WebSocket_AiFps_Send();
@@ -255,6 +259,8 @@ int main(int argc, char *argv[])
 #ifdef BF01_BOOT_CAPTURE
     if (argc == 2 && !strcmp(argv[1], "--boot-ai-worker"))
         return app_ipcam_BootAi_Worker();
+    if (argc == 2 && !strcmp(argv[1], "--sync-rtc"))
+        return app_ipcam_BootTimestampSyncRtc() == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 #endif
     if (argc > 1 && !strcmp(argv[1], "--capture-config")) {
         if (argc != 4) {
@@ -284,10 +290,12 @@ int main(int argc, char *argv[])
     int boot_ai_enabled = 1;
     APP_CHK_RET(app_ipcam_Capture_LoadAiEnabled(&boot_ai_enabled), "load boot AI switch");
     fprintf(stderr, "[boot-ai] recognition=%s\n", boot_ai_enabled ? "enabled" : "disabled");
+    APP_CHK_RET(app_ipcam_BootTimestampLockIpc(), "lock camera IPC");
     APP_CHK_RET(app_ipcam_Msg_Init(), "init early Msg");
     APP_CHK_RET(app_ipcam_MsgAnonInit(), "init early MsgAnon");
     APP_CHK_RET(app_ipcam_BootCapture_Init(), "init early RTOS capture receiver");
     APP_CHK_RET(app_ipcam_BootVideo_Init(), "init early RTOS video receiver");
+    app_ipcam_BootTimestampPoll();
     int gate_result = boot_ai_enabled ? app_ipcam_BootAi_Run() : app_ipcam_BootAi_Bypass();
     if (gate_result) {
         fprintf(stderr, "[boot-ai] gate closed: error=%d; stop recording, no SD media writes\n", gate_result);
