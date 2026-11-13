@@ -14,6 +14,7 @@ void app_ipcam_BootCapture_UnInit(void);
 int app_ipcam_BootCapture_Ready(void);
 int app_ipcam_BootCapture_Stage(struct bf01_burst_reply *metadata, int (*cancelled)(void));
 int app_ipcam_BootCapture_Commit(const struct bf01_burst_reply *metadata);
+int app_ipcam_BootCapture_Discard(void);
 #endif
 
 #endif

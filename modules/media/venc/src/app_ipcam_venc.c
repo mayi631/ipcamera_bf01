@@ -1091,6 +1091,7 @@ static void *Thread_StreamTask_Proc(void *pArgs)
 static void *Thread_Streaming_Proc(void *pArgs)
 {
     CVI_S32 s32Ret = CVI_SUCCESS;
+    CVI_U32 video_sequence = 0;
     APP_VENC_CHN_CFG_S *pastVencChnCfg = (APP_VENC_CHN_CFG_S *)pArgs;
     VENC_CHN VencChn = pastVencChnCfg->VencChn;
     CVI_S32 vpssGrp = pastVencChnCfg->VpssGrp;
@@ -1156,6 +1157,7 @@ static void *Thread_Streaming_Proc(void *pArgs)
             }
         }
 
+        stFrameInfo.frameParam.frameIndex = ++video_sequence;
         if ((1 == stStream.u32PackCount) && (stStream.pstPack[0].u32Len > P_MAX_SIZE)) {
             APP_PROF_LOG_PRINT(LEVEL_WARN, "CVI_VENC_GetStream, VencChn(%d) p oversize:%d\n", VencChn, stStream.pstPack[0].u32Len);
         } else {
@@ -1185,8 +1187,6 @@ static void *Thread_Streaming_Proc(void *pArgs)
                 memcpy(stFrameInfo.frameBuf+stFrameInfo.frameParam.frameLen, stStream.pstPack[i].pu8Addr + stStream.pstPack[i].u32Offset, stStream.pstPack[i].u32Len - stStream.pstPack[i].u32Offset);
                 stFrameInfo.frameParam.frameLen += stStream.pstPack[i].u32Len - stStream.pstPack[i].u32Offset;
             }
-            stFrameInfo.frameParam.frameIndex = stStream.u32Seq;
-
             bool iskey = 0;
             app_ipcam_Venc_StreamStatus_Get(pastVencChnCfg->enType, &stStream.pstPack[0], &iskey);
             if(iskey)
@@ -1237,6 +1237,10 @@ static int capture_jpeg(APP_VENC_CHN_CFG_S *encoder, const char *path)
     int streamHeld = 0;
     FILE *output = NULL;
     pthread_mutex_lock(&JpgEncodeMutex);
+    if (access("/run/ipcamera-wifi/live-mode", F_OK) == 0) {
+        result = -ECANCELED;
+        goto done;
+    }
     if (CVI_VPSS_GetChnFrame(encoder->VpssGrp, encoder->VpssChn, &frame, 0) == CVI_SUCCESS)
         CVI_VPSS_ReleaseChnFrame(encoder->VpssGrp, encoder->VpssChn, &frame);
     result = CVI_VPSS_GetChnFrame(encoder->VpssGrp, encoder->VpssChn, &frame, 2000);
@@ -1284,6 +1288,10 @@ static int capture_jpeg(APP_VENC_CHN_CFG_S *encoder, const char *path)
         goto done;
     }
     if (!path) {
+        if (access("/run/ipcamera-wifi/live-mode", F_OK) == 0) {
+            result = -ECANCELED;
+            goto done;
+        }
         result = _streaming_save_to_flash(encoder, &stream);
         goto done;
     }
@@ -1309,6 +1317,8 @@ static int capture_jpeg(APP_VENC_CHN_CFG_S *encoder, const char *path)
     if (!total || fflush(output) != 0 || fsync(fileno(output)) != 0)
         result = CVI_FAILURE;
 done:
+    if (output && access("/run/ipcamera-wifi/live-mode", F_OK) == 0)
+        result = -ECANCELED;
     if (output && fclose(output) != 0)
         result = CVI_FAILURE;
     if (streamHeld && CVI_VENC_ReleaseStream(encoder->VencChn, &stream) != CVI_SUCCESS)
@@ -1340,6 +1350,18 @@ int app_ipcam_Jpeg_CaptureTo(const char *path)
         }
     }
     return CVI_FAILURE;
+}
+
+int app_ipcam_Jpeg_Quiesce(void)
+{
+    pthread_mutex_lock(&JpgCapMutex);
+    bJpgCapFlag = CVI_FALSE;
+    pthread_mutex_unlock(&JpgCapMutex);
+    int error = pthread_mutex_trylock(&JpgEncodeMutex);
+    if (error)
+        return error == EBUSY ? EINPROGRESS : error;
+    pthread_mutex_unlock(&JpgEncodeMutex);
+    return 0;
 }
 
 static void *Thread_Jpg_Proc(void *pArgs)

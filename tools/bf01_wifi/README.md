@@ -1,0 +1,77 @@
+# BF01 新协议通信层
+
+2026-11-09 正式接入：通信核心、SDIO适配已移入 `solutions/ipcamera/src/bf01_wifi_link.c`、`solutions/ipcamera/src/bf01_wifi_sdio.c`，由原应用Makefile编译进同一个 `ipcamera`。正式常驻入口为 `ipcamera --wifi-service`，控制入口为 `bf01-wifi`。最新部署和验收边界见 `WIFI模块通讯/主控与Wi-Fi实机联调结论.md`。下面“独立/未链接/尚未接入”的段落是本次正式接入前的隔离阶段记录，不作为当前集成状态。
+
+依据 `WIFI模块通讯/主控与WIFI属性联动协议.md`、`WIFI模块通讯/主控联调测试例子.md` 重新实现。
+
+## 当前生产行为
+
+- BF01 的 `make ... install` 同时把正式应用、`bf01-wifi`、`wifi/bf01-sdio-up.sh` 和 `auto.sh` 同步到 SDK `OUTPUT_DIR/data/`，避免应用目录已更新而 `pack_data` 仍打包旧程序。不会覆盖 SDK data 中既有 `param_config.ini`、`capture.ini`、`boot_ai.ini`；已有镜像仍须重新执行 SDK 数据分区打包，安装不等于烧录验收。
+- `bf01-wifi start|stop|status|get NAME|refresh-http|filter|camera-status|module-time|speaker-status|microphone-status|sync-clock` 管理真实应用服务；`get NAME` 通过现有生产服务串行排队查询，结果以该服务 wire 日志的对应 ID 应答为准，不另开 SDIO 消费者；`get http` 使用原凭证刷新流程。`filter` 只读模组 TCP 过滤表；`camera-status` 通过原相机进程读取 ISP/录像；`module-time` 读取无时区 native tm，不直接写 UTC；`speaker-status`、`microphone-status` 经同一正式服务只读 DAC/ADC 双声道增益、静音和已应用设置。
+- `start` 在驱动控制接口可用并启动网络 watcher 后立即启动协议服务，不再等待 Linux IP 同步；联网仍由模组负责，watcher 同步主控地址、路由和 DNS。后台校时等真实 `watcher.ready` / `network.ready` 后开始，最多等待 30 秒；时间无效时每轮 supervisor 检查会尝试启动同一独占校时任务，网络晚到或校时失败可自动重试，不依赖客户命令行。
+- 校时优先走已有正式 `ipcamera --wifi-sync-time` 的 `time.nist.gov:37` TCP 路径（外层限时 8 秒），检查范围并读回 UTC；失败后才有界尝试 NTP 20 秒，已有有效时间不覆盖。启动锁、校时锁防止重复执行，协议服务不等校时任务结束。该无认证时间源不代替凭证或身份验证；网络不可达明确失败，不放开原来的 report/HTTP 时间门禁。`sync-clock` 仍可由研发侧重试同一路径。
+- 凭证刷新 ACK2 是一轮完整回复。正式程序等 30 秒后换新 ID 最多再请求两轮，不用原 ID 冒充重新刷新。没有收到回复时才按原 ID 重试。
+- 自动刷新单独检查已经确认会话中的凭证到期时间；即使旧凭证已过期，仍按既有退避重新请求，不会因 `http_usable=false` 永久停止刷新。过期凭证仍不向业务开放，缺少全量 `report` 成功确认或尚未取得凭证时不启动该刷新；`status.http_refresh_due` 只读显示此条件。
+- 单条请求无回复不会清空其他排队请求或已经取得且未过期的凭证。`completed` 在重试耗尽时收到空回复，调用方须检查。
+- `image_anti_flicker` 通过原相机控制桥接到 ISP Get/Set/Get；相机在线时曾真实读回 `60Hz`，相机按原 AI 门控退出时仍返回未就绪，不沿用历史结果。`status_led_switch` 按协议对未单列灯的板型接收，不代表实际点灯。
+- `spk_vol` 使用已有 `/dev/cvitekadac` 双声道 Set/Get 并读回确认，再持久化音量；不初始化 AO/AI、不操作 ADC 和功放 GPIO。真实全量 `set` 的 `80` 已将增益从 `32/32` 改为 `26/26`；重复同值不写硬件或设置文件。原播放 AO 初始化后恢复已应用音量，没有设置文件时保持原逻辑；寄存器读回不等于已经验证实际播放。
+- `mic_switch` 使用 `/dev/cvitekaadc` 只改左右静音位，Get/Set/Get 验证增益未变后持久化；错误不确认成功，尚未安装新策略时尝试恢复原静音位。实际收到 `false` 后读回左/右原生静音值1/2、增益保持9/0。BF01录像的RTOS和Linux两路PCM在原AAC写入点共同执行录音策略：关闭时用等长零样本保持PTS，未收到配置时保持原音频，不改变抓拍触发或录像时长。`app_ipcam_Microphone_GuardFrame()` 返回持有共享锁的文件描述符，调用方须在本次 `app_mp4_write_pcm()` 结束后关闭；设置使用互斥锁，避免确认后还有新读出的未静音PCM写入。损坏策略明确失败，不放开声音。实际MP4静音和恢复录音仍需正常相机流程验收，不能拿ADC位读回代替。
+- 其余 11 项没有真实执行后端，全量仍回 ACK2。`set_not_applied.field_errno` 为主控本地逐字段错误码：`38` 是执行后端未实现，`image_anti_flicker:2` 是本地相机套接字不存在，不是 Wi-Fi 协议 ACK2 的另一个名字。不能把 `wifi_saved_dps` 当作 `host_applied_fields`。
+- 初次加载不再默认等45秒：立即检查 `mmc1` 的 `007a:6011`，未枚举时有界重扫，出现即加载。Linux/RHEA/SDIO驱动先完成绑定并返回，后台独占worker反复做真实握手：检查总线宽度、必要时恢复SDIO通信、启用function并恢复块大小，再走原生WSM初始化；单轮WSM通知窗口1秒，失败清理线程/工作队列/缓存，清理完成1秒后重试，无总次数限制。总线操作和清理另有耗时，不代表整轮严格2秒。握手成功不再重试，不卸载模块、不解绑、不重置模组CPU。`bf01_startup_state` 显示 `handshaking/retry/ready/stopped` 及轮次/错误码；helper等真实ready后仍检查 `wlan0` 和控制接口，才启动网络watcher、协议和自动校时。helper单轮等待60秒不停止驱动worker，后续supervisor继续检查。`startup-not-before` 保留显式研发下限，默认0；`network-start` 不等IP，`network`仍等真实IP。
+- 前两轮启动候选已被冷启动否定：先是短窗口超时，再是60秒等不到WSM；后一轮uptime25.9秒实收CMD52的IOEx/IORx/IF均为0，不能继续将可枚举当软件已就绪。当前后台重握手方案等待整机冷启动验收，软件测试不代替模组实机通知、联网或APP业务通过。仅主控重启/模组保电仍需独立验证。
+
+## 历史隔离阶段安全边界
+
+这里是可单独构建的库，不参与原 `ipcamera` 的源文件扫描、链接、安装或启动。未修改 AI 门控、抓拍间隔、录像时长、音频、SD 卡管理、水印、现有预览和时间戳代码。原应用与当前 Git 暂存区保持一致。
+
+没有启动脚本、自动配网、驱动热重载、WSM 启动绕过、硬编码能力数据或恢复出厂动作。原始协议文档和历史联调记录保留；历史记录不代表这份独立实现已通过实机验收。
+
+## 实现内容
+
+- `wifi_link.c`：串行会话状态机。通过 `receive` 接收异步指令，经 `exchange` 返回同 ID 确认，不发空字符串，不用 `get/dps` 代替主动全量 `set`。
+- 全量 `set` 实际应用成功并完成确认后才生成全量 `report`；该 `report` 获得自己的成功确认后，才接受主动 `http`。HTTP 凭证在确认交换成功且返回空串后对调用方开放。
+- 增量设置不重建 HTTP 会话；新全量设置成功应用后重新同步。过滤不属于主控的未知设置，校验已知键。没有应用后端则返回 `2`，绝不把保存 JSON 当成硬件已生效。
+- 终态指令缓存同 ID 确认；相同 ID 携带不同内容拒绝。缓存外的已完成旧 ID 不再执行。`2` 表示没有开始动作，可在同 ID 重试时重新检查就绪状态。
+- 主控 `get/report/file/stream state` 每次交换只接受自身 ID 的 `ack`。成功的 `get` 必须含对应命名对象。请求间隔 3 秒、最多发送 3 次，超时撤销凭证可用状态，不拆 SDIO。
+- 主动 `stream/start/stop` 交给独立回调；校验 RTSP/RTMP、地址、通道、码流和有效期。不构造平台 start，不把本地 RTSP 预览服务器当作 RTSP 发布实现。
+- `wifi_sdio.c`：`_IOR(121,90,unsigned int)` 只读取驱动本地的 `0x083B` 队列；`_IOWR(121,53,unsigned int)` 发真实 `0x003B` Direct Buffer。
+
+## 后端契约
+
+使用 `wifi_link.h` 的 `bf_wifi_ops` 注册真实后端。一个会话只由一个线程调用，不在回调中重入同一个会话。
+
+| 回调 | 要求 |
+| --- | --- |
+| `receive` | 无异步报文返回 `EAGAIN`，不能通过发送空字符串向模块取指令 |
+| `exchange` | 成功返回 0，回复写入带结尾 NUL 的缓冲区；传输错误返回正 errno |
+| `apply` | 只在真实应用完成后返回 0；尚未执行返回 2；拒绝返回 1。成功的动作不会因 ACK 传输失败重复调用 |
+| `stream` | 不改动现有相机初始化；尚未就绪返回 2，拒绝返回 1；不允许未推流就返回 0 |
+| `snapshot` | `report` 返回完整只读属性；`status/stream` 返回对应对象。对象所有权交给通信层，不用默认值冒充硬件读数 |
+| `completed` | 只接收正确匹配的终态确认；回调内不得保留临时 JSON 指针 |
+
+缺少 `apply/stream/snapshot` 时不会启动媒体操作，也不会假确认成功。现在尚未把这些回调接回原应用；这是保护已完成功能的隔离边界，不是自动联网/直播交付版。HTTP 对象是会话持有的只读借用对象，不跨 `step/reset/destroy` 保留指针。正式代码不输出凭证和推流地址。
+
+## 构建
+
+```sh
+make -C tools/bf01_wifi
+make -C tools/bf01_wifi OUTPUT=/tmp/bf01-wifi-arm CC=/path/to/arm-linux-gnueabihf-gcc AR=/path/to/arm-linux-gnueabihf-ar
+```
+
+产物只有 `libbf01_wifi_link.a`，不会替换原应用。链接调用程序时需 `-lm`。更换编译器时使用不同的 `OUTPUT`，避免混用本机和 ARM 对象。
+
+驱动候选单独构建：
+
+```sh
+bash tools/bf01_wifi/build-driver.sh /path/to/SDK /tmp/bf01-wifi-driver /path/to/arm-linux-gnueabihf-
+```
+
+驱动源码改动统一由 BSP 的 `patches/0042-osdrv--feat-wifi-add-bidirectional-host-integration.patch` 管理；SDK 必须先包含 2026-11-12 更新后的完整 0042。应用不再携带或自动应用驱动补丁。该补丁提供 Direct Buffer 有界确认、`0x083B` 接收队列，以及等待启动通知 1000ms、失败清理后间隔 1000ms 重试的后台 WSM 握手。WSM 未就绪时总线读写失败交回外层 worker；握手后的原生重试策略不变。
+
+脚本每次从 SDK 复制源码到新的隔离目录，检查上述必需功能后编译；缺少功能会明确报错，提示先在 SDK 应用新版 0042，不会兜底打补丁或沿用旧 ko。脚本不改 SDK 源码，也不部署板端。BF01 正式 `make install` 仍调用该脚本，将本次新编译 ko 同时安装到项目 install 和 SDK DATA 暂存；非 BF01 不走该构建。之后仍须正式 pack_data/pack_upgrade，客户无需命令行。接收支持 1600 字节 JSON；当前 SDK 发送帧空间限制主控 JSON 为 1595 字节，超限明确返回 EMSGSIZE，不截断。双向 1600 字节上限仍须与模块确认帧容量。
+
+## 本轮验证与下一步
+
+2026-11-09：原应用基线重新交叉编译、安装通过；独立库本机/ARM 严格告警编译通过；独立驱动候选编译通过。外部临时测试程序通过 ASan/UBSan 的双向握手、重复包、busy、重同步、凭证门禁、get、file、stream 路由、匹配 ID、重试和长度边界用例。LeakSanitizer 受当前 ptrace 环境限制，未运行成功；未将其记为通过。
+
+这些是使用假后端的本机协议测试，不是真实 SDIO 属性生效、文件上传或 APP 直播验收。下一步先在相机原功能回归通过后，仅验证驱动异步收发，再逐项接入真实后端；不得再次为通信联调修改 AI/录像/抓拍策略。

@@ -18,6 +18,7 @@
 #include <libavutil/mem.h>
 #include <libswresample/swresample.h>
 #include "app_ipcam_audio.h"
+#include "app_ipcam_speaker.h"
 #include "cvi_audio.h"
 
 #define PLAYBACK_RATE 16000
@@ -262,6 +263,11 @@ static int play_file(int descriptor, int *ao_enabled, int *channel_enabled)
         if (CVI_AO_SetVolume(0, 32) != CVI_SUCCESS ||
             CVI_AO_SetMute(0, CVI_FALSE, NULL) != CVI_SUCCESS)
             goto done;
+        int volume_error = app_ipcam_Speaker_Restore();
+        if (volume_error) {
+            result = AVERROR(volume_error);
+            goto done;
+        }
         result = send_silence(&output, 10);
         if (result < 0)
             goto done;
@@ -280,7 +286,7 @@ static int play_file(int descriptor, int *ao_enabled, int *channel_enabled)
         }
         fprintf(stderr, "[audio] speaker held on: AO and amplifier retained between prompts\n");
     }
-    fprintf(stderr, "[audio] playback started: 16000 Hz mono PCM, DAC volume=32\n");
+    fprintf(stderr, "[audio] playback started: 16000 Hz mono PCM\n");
     while (!interrupted(NULL)) {
         result = av_read_frame(format, packet);
         if (result < 0)

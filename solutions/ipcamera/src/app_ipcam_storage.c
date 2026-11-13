@@ -32,6 +32,7 @@ struct storage_card {
 struct storage_mount {
     int found;
     int readonly;
+    int dirsync;
     int elsewhere;
     char device[128];
 };
@@ -101,6 +102,7 @@ static int read_mounts(const struct storage_card *card, struct storage_mount *mo
         if (!strcmp(entry.mnt_dir, APP_STORAGE_MOUNT)) {
             mounted->found = 1;
             mounted->readonly = hasmntopt(&entry, "ro") != NULL;
+            mounted->dirsync = hasmntopt(&entry, "dirsync") != NULL || hasmntopt(&entry, "sync") != NULL;
             if (strlen(entry.mnt_fsname) >= sizeof(mounted->device)) {
                 endmntent(mounts);
                 errno = ENAMETOOLONG;
@@ -244,11 +246,12 @@ static void refresh_storage(int removed)
             set_state("mount_failed", EIO);
             return;
         }
-        if (mount(detected.device, APP_STORAGE_MOUNT, "vfat", MS_NODEV | MS_NOSUID | MS_NOATIME, NULL) != 0) {
+        if (mount(detected.device, APP_STORAGE_MOUNT, "vfat", MS_NODEV | MS_NOSUID | MS_NOATIME | MS_DIRSYNC, NULL) != 0) {
             set_state("mount_failed", errno);
             return;
         }
-        fprintf(stderr, "[storage] mounted %s at %s\n", detected.device, APP_STORAGE_MOUNT);
+        mounted.dirsync = 1;
+        fprintf(stderr, "[storage] mounted %s at %s with synchronous directory updates\n", detected.device, APP_STORAGE_MOUNT);
         storage_generation++;
     }
     strcpy(storage_managed, detected.device);
@@ -266,6 +269,19 @@ static void refresh_storage(int removed)
         storage_ready = 0;
         set_state("read_only", EROFS);
         return;
+    }
+    if (!mounted.dirsync) {
+        storage_ready = 0;
+        if (storage_users) {
+            set_state("mount_options_busy", EBUSY);
+            return;
+        }
+        if (mount(detected.device, APP_STORAGE_MOUNT, "vfat",
+                MS_REMOUNT | MS_NODEV | MS_NOSUID | MS_NOATIME | MS_DIRSYNC, NULL) != 0) {
+            set_state("mount_options_failed", errno);
+            return;
+        }
+        fprintf(stderr, "[storage] enabled synchronous directory updates on %s\n", detected.device);
     }
     if (storage_free < STORAGE_MIN_FREE) {
         storage_ready = 0;

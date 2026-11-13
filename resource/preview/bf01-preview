@@ -7,6 +7,11 @@ AP_TOOL="$BASE/bf01_atbm_ap"
 WIFI=/mnt/system/wifi/wifi.sh
 RUN=/run/bf01-preview
 CFG=/mnt/cfg/bf01-preview
+CFG_MOUNT=/mnt/cfg
+if ! awk '$2 == "/mnt/cfg" { found = 1 } END { exit !found }' /proc/mounts; then
+    CFG=/mnt/data/bf01-preview-config
+    CFG_MOUNT=/mnt/data
+fi
 AP_PID=
 RESTORE_WIFI=0
 HAVE_WIFI_LOCK=0
@@ -31,8 +36,9 @@ lock_wait()
 
 cfg_ready()
 {
-    awk '$2 == "/mnt/cfg" { found = 1 } END { exit !found }' /proc/mounts ||
-        fail '/mnt/cfg is not mounted; refusing to save on rootfs'
+    awk -v target="$CFG_MOUNT" '$2 == target && $4 ~ /(^|,)rw(,|$)/ { found = 1 } END { exit !found }' /proc/mounts ||
+        fail "$CFG_MOUNT is not mounted writable; refusing to save on rootfs"
+    [ ! -L "$CFG" ] || fail 'configuration directory must not be a symlink'
     mkdir -p "$CFG" || fail 'cannot create configuration directory'
     chmod 700 "$CFG" || fail 'cannot protect configuration directory'
 }
@@ -214,6 +220,14 @@ case "$ACTION" in
         ;;
     stop)
         [ "$#" -eq 0 ] || fail 'stop takes no arguments'
+        touch "$RUN/supervisor.stop"
+        if [ -r "$RUN/supervisor.pid" ]; then
+            read -r BOOT_SUPERVISOR < "$RUN/supervisor.pid"
+            case "$BOOT_SUPERVISOR" in
+                ''|*[!0-9]*|0|1) ;;
+                *) kill -TERM "$BOOT_SUPERVISOR" 2>/dev/null || true ;;
+            esac
+        fi
         if supervisor_running; then
             kill -TERM "$SUPERVISOR_PID" || fail 'cannot stop ipcamera'
             COUNT=0

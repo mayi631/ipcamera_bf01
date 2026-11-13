@@ -337,11 +337,11 @@ static int stopped_reply(const struct bf01_video_reply *reply)
             reply->state == BF01_VIDEO_RELEASED);
 }
 
-void app_ipcam_BootVideo_Stop(void)
+int app_ipcam_BootVideo_Stop(void)
 {
     if (!initialized)
-        return;
-    struct bf01_video_reply response_for_stop;
+        return 0;
+    struct bf01_video_reply response_for_stop = {0};
     exchange(BF01_VIDEO_STOP, &response_for_stop, 200);
     uint64_t deadline = monotonic_ms() + 5000;
     while (!stopped_reply(&response_for_stop) && monotonic_ms() < deadline) {
@@ -356,9 +356,13 @@ void app_ipcam_BootVideo_Stop(void)
         have_next_frame = 0;
         have_next_audio = 0;
     }
-    if (stopped_reply(&response_for_stop))
-        exchange(BF01_VIDEO_RELEASE, &response_for_stop, 200);
-    else
-        fprintf(stderr, "[boot-video] stop not acknowledged; bounded RTOS cache retained\n");
+    if (stopped_reply(&response_for_stop)) {
+        int error = exchange(BF01_VIDEO_RELEASE, &response_for_stop, 200);
+        if (stopped_reply(&response_for_stop) && response_for_stop.state == BF01_VIDEO_RELEASED)
+            return 0;
+        return error ? error : EPROTO;
+    }
+    fprintf(stderr, "[boot-video] stop not acknowledged; bounded RTOS cache retained\n");
+    return ETIMEDOUT;
 }
 #endif

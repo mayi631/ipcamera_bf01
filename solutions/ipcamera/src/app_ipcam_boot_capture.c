@@ -273,4 +273,28 @@ int app_ipcam_BootCapture_Commit(const struct bf01_burst_reply *metadata)
     }
     return error;
 }
+
+int app_ipcam_BootCapture_Discard(void)
+{
+    struct bf01_burst_reply reply;
+    uint64_t deadline = now_ms() + 3000;
+    int error;
+    do {
+        error = exchange(BF01_BURST_DISCARD, 0, 0, &reply, deadline);
+        if (error != EBUSY)
+            break;
+        usleep(20000);
+    } while (now_ms() < deadline);
+    if (!error && reply.state != BF01_BURST_RELEASED)
+        error = EPROTO;
+    for (unsigned int index = 0; index < BF01_BURST_COUNT; index++) {
+        char path[128];
+        snprintf(path, sizeof(path), APP_BOOT_CAPTURE_DIR "/photo%u.jpg", index);
+        unlink(path);
+        snprintf(path, sizeof(path), APP_BOOT_CAPTURE_DIR "/photo%u.part", index);
+        unlink(path);
+    }
+    fprintf(stderr, "[boot-capture] discard without SD commit errno=%d\n", error);
+    return error;
+}
 #endif

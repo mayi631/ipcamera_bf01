@@ -15,6 +15,9 @@
 #include "app_ipcam_boot_ai.h"
 #include "app_ipcam_boot_timestamp.h"
 #include "app_ipcam_playback.h"
+#include "app_ipcam_wifi_link.h"
+#include "app_ipcam_wifi_camera.h"
+#include "app_ipcam_event.h"
 
 /**************************************************************************
  *                              M A C R O S                               *
@@ -33,6 +36,8 @@
  **************************************************************************/
 static pthread_t g_pthMisc;
 static CVI_BOOL g_bMisc;
+static int live_only;
+static int boot_capture_allowed = 1;
 
 /**************************************************************************
  *                 E X T E R N A L    R E F E R E N C E S                 *
@@ -110,8 +115,10 @@ static int app_ipcam_MiscThread_DeInit(void)
 
 static int app_ipcam_Exit(void)
 {
+    app_ipcam_WifiCamera_Stop();
     app_ipcam_Playback_Stop();
-    app_ipcam_Capture_Stop();
+    if (!live_only)
+        app_ipcam_Capture_Stop();
 #ifdef BF01_BOOT_CAPTURE
     app_ipcam_BootVideo_UnInit();
     app_ipcam_BootCapture_UnInit();
@@ -256,12 +263,44 @@ static int app_ipcam_Init(void)
 
 int main(int argc, char *argv[])
 {
+    if (argc == 2 && !strcmp(argv[1], "--wifi-sync-time"))
+        return app_ipcam_Wifi_SyncClock();
+    if (argc == 2 && !strcmp(argv[1], "--wifi-service"))
+        return app_ipcam_Wifi_Service();
+    if (argc == 2 && !strcmp(argv[1], "--wifi-status"))
+        return app_ipcam_Wifi_Control("status");
+    if (argc == 3 && !strcmp(argv[1], "--wifi-get")) {
+        if (!argv[2][0] || strlen(argv[2]) > 16)
+            return EXIT_FAILURE;
+        if (!strcmp(argv[2], "http"))
+            return app_ipcam_Wifi_Control("refresh-http");
+        char operation[32];
+        snprintf(operation, sizeof(operation), "get:%s", argv[2]);
+        return app_ipcam_Wifi_Control(operation);
+    }
+    if (argc == 2 && !strcmp(argv[1], "--wifi-refresh-http"))
+        return app_ipcam_Wifi_Control("refresh-http");
+    if (argc == 2 && !strcmp(argv[1], "--wifi-filter"))
+        return app_ipcam_Wifi_Control("filter");
+    if (argc == 2 && !strcmp(argv[1], "--wifi-camera-status"))
+        return app_ipcam_Wifi_Control("camera-status");
+    if (argc == 2 && !strcmp(argv[1], "--wifi-module-time"))
+        return app_ipcam_Wifi_Control("module-time");
+    if (argc == 2 && !strcmp(argv[1], "--wifi-speaker-status"))
+        return app_ipcam_Wifi_Control("speaker-status");
+    if (argc == 2 && !strcmp(argv[1], "--wifi-microphone-status"))
+        return app_ipcam_Wifi_Control("microphone-status");
 #ifdef BF01_BOOT_CAPTURE
     if (argc == 2 && !strcmp(argv[1], "--boot-ai-worker"))
         return app_ipcam_BootAi_Worker();
     if (argc == 2 && !strcmp(argv[1], "--sync-rtc"))
         return app_ipcam_BootTimestampSyncRtc() == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 #endif
+    if (argc > 1 && !strcmp(argv[1], "--live-camera")) {
+        live_only = 1;
+        argc--;
+        argv++;
+    }
     if (argc > 1 && !strcmp(argv[1], "--capture-config")) {
         if (argc != 4) {
             fprintf(stderr, "Usage: ipcamera --capture-config SECONDS(1-300) CHANNEL(0-2)\n");
@@ -295,15 +334,29 @@ int main(int argc, char *argv[])
     APP_CHK_RET(app_ipcam_MsgAnonInit(), "init early MsgAnon");
     APP_CHK_RET(app_ipcam_BootCapture_Init(), "init early RTOS capture receiver");
     APP_CHK_RET(app_ipcam_BootVideo_Init(), "init early RTOS video receiver");
-    app_ipcam_BootTimestampPoll();
-    int gate_result = boot_ai_enabled ? app_ipcam_BootAi_Run() : app_ipcam_BootAi_Bypass();
-    if (gate_result) {
-        fprintf(stderr, "[boot-ai] gate closed: error=%d; stop recording, no SD media writes\n", gate_result);
-        app_ipcam_BootVideo_UnInit();
-        app_ipcam_BootCapture_UnInit();
-        app_ipcam_MsgAnonDeInit();
-        app_ipcam_Msg_Deinit();
-        return gate_result == ENODATA ? EXIT_SUCCESS : EXIT_FAILURE;
+    if (!live_only) {
+        app_ipcam_BootTimestampPoll();
+        int gate_result = 0;
+        if (!app_event_live())
+            gate_result = boot_ai_enabled ? app_ipcam_BootAi_Run() : app_ipcam_BootAi_Bypass();
+        if (gate_result) {
+            fprintf(stderr, "[boot-ai] gate closed: error=%d; stop recording, no SD media writes\n", gate_result);
+            app_ipcam_BootVideo_UnInit();
+            app_ipcam_BootCapture_UnInit();
+            boot_capture_allowed = 0;
+            fprintf(stderr, "[boot-ai] media gate closed; camera control remains available for APP live\n");
+        }
+        if (!gate_result && app_event_live()) {
+            APP_CHK_RET(app_ipcam_BootAi_Discard(), "discard AI input before live");
+            APP_CHK_RET(app_ipcam_BootCapture_Discard(), "discard boot photos before live");
+            APP_CHK_RET(app_ipcam_BootVideo_Stop(), "discard boot video before live");
+            boot_capture_allowed = 0;
+        }
+    } else {
+        APP_CHK_RET(app_ipcam_BootAi_Discard(), "discard AI input on camera recovery");
+        APP_CHK_RET(app_ipcam_BootCapture_Discard(), "discard boot photos on camera recovery");
+        APP_CHK_RET(app_ipcam_BootVideo_Stop(), "discard boot video on camera recovery");
+        fprintf(stderr, "[live] dedicated camera: no boot capture, recording or AI policy changes\n");
     }
 #endif
 
@@ -329,7 +382,13 @@ int main(int argc, char *argv[])
     APP_CHK_RET(app_ipcam_Venc_Start(APP_VENC_ALL), "start video processing");
 
     APP_CHK_RET(app_ipcam_Storage_Start(), "start SD storage monitor");
-    APP_CHK_RET(app_ipcam_Capture_Start(), "start boot capture workflow");
+    if (!live_only && boot_capture_allowed) {
+        APP_CHK_RET(app_ipcam_Capture_Start(), "start boot capture workflow");
+    }
+
+    int wifiCameraError = app_ipcam_WifiCamera_Start();
+    if (wifiCameraError)
+        fprintf(stderr, "[wifi-camera] control unavailable error=%d; camera continues\n", wifiCameraError);
 
     int previewStarted = app_ipcam_Preview_Start() == CVI_SUCCESS;
     if (!previewStarted)
@@ -378,10 +437,15 @@ int main(int argc, char *argv[])
     //APP_CHK_RET(app_ipcam_CmdTask_Create(), "running cmd test");
 
     while (1) {
+        app_ipcam_WifiCamera_Poll();
         struct timespec waitTime = { .tv_sec = 1 };
         int receivedSignal = sigtimedwait(&photoSignals, NULL, &waitTime);
         int signalError = errno;
         if (receivedSignal == SIGUSR1) {
+            if (live_only || app_event_live()) {
+                fprintf(stderr, "[live] photo signal ignored by live-only camera\n");
+                continue;
+            }
 #ifdef BF01_BOOT_CAPTURE
             if (!app_ipcam_BootCapture_Ready()) {
                 fprintf(stderr, "[boot-capture] manual photo rejected: RTOS still owns JPEG channel\n");

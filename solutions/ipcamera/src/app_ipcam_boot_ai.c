@@ -25,9 +25,9 @@
 #include "cvi_sys.h"
 #include "cviruntime.h"
 #include "minIni.h"
+#include "app_ipcam_event.h"
 
 #define AI_RUN_DIR "/run/ipcamera-ai"
-#define AI_CONFIG "/mnt/cfg/ipcamera/boot_ai.ini"
 #define AI_MIN_ION_BYTES 36745216U
 #define AI_TOTAL_TIMEOUT_MS 28000U
 
@@ -193,10 +193,11 @@ static int load_job(struct ai_job *job)
     int error = executable_directory(directory, sizeof(directory));
     if (error)
         return error;
-    if (access(AI_CONFIG, F_OK) == 0) {
-        strcpy(config, AI_CONFIG);
-    } else {
-        if (errno != ENOENT)
+    error = app_event_config_path("boot_ai.ini", config, sizeof(config));
+    if (error && error != ENODEV)
+        return error;
+    if (error || access(config, F_OK) != 0) {
+        if (!error && errno != ENOENT)
             return errno;
         int length = snprintf(config, sizeof(config), "%s/boot_ai.ini", directory);
         if (length < 0 || (size_t)length >= sizeof(config))
@@ -638,6 +639,17 @@ static void report(const char *state, int error, const struct ai_result *result,
         AI_INPUT_SOURCE, state, error, result->class_id, result->score, result->forward_us / 1000.0);
     if (mkdir(AI_RUN_DIR, 0700) != 0 && errno != EEXIST)
         return;
+    cJSON *details = cJSON_CreateObject();
+    if (details) {
+        cJSON_AddStringToObject(details, "state", state);
+        cJSON_AddStringToObject(details, "source", AI_INPUT_SOURCE);
+        cJSON_AddNumberToObject(details, "error", error);
+        cJSON_AddNumberToObject(details, "classId", result->class_id);
+        cJSON_AddNumberToObject(details, "score", result->score);
+        cJSON_AddNumberToObject(details, "ptsUs", (double)(((uint64_t)job->frame.pts_high << 32) | job->frame.pts_low));
+        app_event_write_json(AI_RUN_DIR "/result.json", details);
+        cJSON_Delete(details);
+    }
     int descriptor = open(AI_RUN_DIR "/status.part", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
     if (descriptor < 0)
         return;
@@ -724,6 +736,23 @@ int app_ipcam_BootAi_Run(void)
     if (!error && !result.passed)
         error = ENODATA;
     report(ai_allowed ? "passed" : (error == ENODATA ? "rejected" : "failed"), error, &result, &job);
+    CVI_IPCM_DeregisterAnonHandle(BF01_AI_PORT);
+    return error;
+}
+
+int app_ipcam_BootAi_Discard(void)
+{
+    if (CVI_IPCM_RegisterAnonHandle(BF01_AI_PORT, receive_reply, NULL))
+        return EIO;
+    struct bf01_ai_reply reply = {0};
+    int error = EIO;
+    for (unsigned int attempt = 0; attempt < 5; attempt++) {
+        error = exchange(BF01_AI_REJECT, 0, &reply);
+        if (reply.magic == BF01_AI_MAGIC && reply.version == BF01_AI_VERSION && reply.state == BF01_AI_REJECTED) {
+            error = 0;
+            break;
+        }
+    }
     CVI_IPCM_DeregisterAnonHandle(BF01_AI_PORT);
     return error;
 }

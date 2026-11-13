@@ -8,10 +8,28 @@ case "$1" in
         "$BASE/auto.sh" >/run/bf01-preview-boot.log 2>&1 </dev/null &
         ;;
     stop)
+        mkdir -p /run/bf01-preview
+        touch /run/bf01-preview/supervisor.stop
+        if [ -r /run/bf01-preview/supervisor.pid ]; then
+            read -r SUPERVISOR < /run/bf01-preview/supervisor.pid
+            case "$SUPERVISOR" in
+                ''|*[!0-9]*|0|1) ;;
+                *)
+                    kill -TERM "$SUPERVISOR" 2>/dev/null || true
+                    WAIT=0
+                    while kill -0 "$SUPERVISOR" 2>/dev/null; do
+                        [ "$WAIT" -lt 30 ] || { echo 'Camera supervisor is still stopping' >&2; exit 1; }
+                        sleep 1
+                        WAIT=$((WAIT + 1))
+                    done
+                    ;;
+            esac
+        fi
+        [ ! -x "$BASE/bf01-wifi" ] || "$BASE/bf01-wifi" stop
         "$PREVIEW" stop
         ;;
     restart)
-        "$PREVIEW" stop || exit 1
+        "$0" stop || exit 1
         "$BASE/auto.sh" >/run/bf01-preview-boot.log 2>&1 </dev/null &
         ;;
     *) echo 'Usage: S99zpreview {start|stop|restart}' >&2; exit 1 ;;

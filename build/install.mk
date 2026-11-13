@@ -26,11 +26,28 @@ install:
 	@cp -rf $(TARGET) $(APP_INSTALL_DIR)
 	@install -m 600 $(APP_RESOURCE_DIR)/preview/capture.ini $(APP_INSTALL_DIR)/capture.ini
 ifeq ($(CONFIG_RESOURCE_INSTALL_FBM_CV1815JA_BF01_GC4683),y)
+	@test -n "$(OUTPUT_DIR)" || { echo 'BF01 install requires SDK OUTPUT_DIR' >&2; exit 1; }
+	@bash "$(SRCTREE)/tools/bf01_wifi/build-driver.sh" "$(TOP_DIR)" "$(TARGET_OUT_DIR)/bf01-wifi-driver" "$(CROSS_COMPILE)"
+	@mkdir -p $(APP_INSTALL_DIR)/wifi
+	@install -m 755 $(APP_RESOURCE_DIR)/preview/bf01-wifi $(APP_INSTALL_DIR)/bf01-wifi
+	@install -m 755 $(APP_RESOURCE_DIR)/preview/bf01-sdio-up.sh $(APP_INSTALL_DIR)/wifi/bf01-sdio-up.sh
+	@install -m 755 $(TOP_DIR)/install/soc_cv1815ja_bf01_spinand/data/wifi/atbm_wifi_ctl $(APP_INSTALL_DIR)/wifi/
+	@install -m 644 $(TARGET_OUT_DIR)/bf01-wifi-driver/atbm6461_wifi_sdio.ko $(APP_INSTALL_DIR)/wifi/
+	@install -m 644 $(TOP_DIR)/install/soc_cv1815ja_bf01_spinand/data/wifi/cfg80211.ko $(APP_INSTALL_DIR)/wifi/
+	@install -d "$(OUTPUT_DIR)/data/wifi"
+	@install -m 644 $(TARGET_OUT_DIR)/bf01-wifi-driver/atbm6461_wifi_sdio.ko "$(OUTPUT_DIR)/data/wifi/"
+	@install -m 755 $(TARGET) "$(OUTPUT_DIR)/data/ipcamera"
+	@install -m 755 $(APP_RESOURCE_DIR)/preview/bf01-wifi "$(OUTPUT_DIR)/data/bf01-wifi"
+	@install -m 755 $(APP_RESOURCE_DIR)/preview/bf01-sdio-up.sh "$(OUTPUT_DIR)/data/wifi/bf01-sdio-up.sh"
+	@install -m 755 $(APP_RESOURCE_DIR)/preview/auto.sh.example "$(OUTPUT_DIR)/data/auto.sh"
 	@install -m 600 $(APP_RESOURCE_DIR)/preview/boot_ai.ini $(APP_INSTALL_DIR)/boot_ai.ini
+	@install -m 600 $(APP_RESOURCE_DIR)/preview/cloud.ini $(APP_INSTALL_DIR)/cloud.ini
 	@install -m 644 $(SRCTREE)/ai_model/yolov5s_cv181x_bf16.cvimodel $(APP_INSTALL_DIR)/yolov5s_cv181x_bf16.cvimodel
 	@mkdir -p $(APP_INSTALL_DIR)/lib
 	@install -m 755 $(TOP_DIR)/install/soc_cv1815ja_bf01_spinand/tpu_32bit/cvitek_tpu_sdk/lib/libcviruntime.so $(APP_INSTALL_DIR)/lib/
 	@install -m 755 $(TOP_DIR)/install/soc_cv1815ja_bf01_spinand/tpu_32bit/cvitek_tpu_sdk/lib/libcvikernel.so $(APP_INSTALL_DIR)/lib/
+	@install -m 755 $(OPENSSL_LIB_DIR)/libssl.so.1.1 $(OPENSSL_LIB_DIR)/libcrypto.so.1.1 $(APP_INSTALL_DIR)/lib/
+	@install -m 644 $(TOP_DIR)/ramdisk/rootfs/public/python3.7/arm64/lib/site-packages/certifi/cacert.pem $(APP_INSTALL_DIR)/cloud-ca.pem
 endif
 ifeq ($(CONFIG_MODULE_PREVIEW),y)
 	@install -m 755 $(TARGET_OUT_DIR)/bin/bf01_atbm_ap $(APP_INSTALL_DIR)/bf01_atbm_ap

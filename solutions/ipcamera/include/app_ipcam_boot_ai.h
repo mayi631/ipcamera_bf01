@@ -4,6 +4,7 @@
 #ifdef BF01_BOOT_CAPTURE
 int app_ipcam_BootAi_Run(void);
 int app_ipcam_BootAi_Bypass(void);
+int app_ipcam_BootAi_Discard(void);
 int app_ipcam_BootAi_Worker(void);
 int app_ipcam_BootAi_Allowed(void);
 #endif

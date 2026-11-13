@@ -12,7 +12,7 @@ int app_ipcam_BootVideo_ReadFrame(unsigned char *buffer, size_t capacity,
     struct bf01_video_frame *frame, int timeout_ms);
 int app_ipcam_BootVideo_ReadAudio(int16_t *samples, size_t capacity,
     uint64_t *pts, uint64_t first_pts, uint64_t through_pts);
-void app_ipcam_BootVideo_Stop(void);
+int app_ipcam_BootVideo_Stop(void);
 #endif
 
 #endif

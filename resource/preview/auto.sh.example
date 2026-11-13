@@ -4,8 +4,12 @@ BASE=/mnt/data
 [ -x "$BASE/ipcamera" ] || BASE=/mnt/system/bf01-preview
 [ -x "$BASE/ipcamera" ] || exit 0
 MODE=off
-if [ -f /mnt/cfg/bf01-preview/mode ]; then
-    read -r MODE < /mnt/cfg/bf01-preview/mode || exit 1
+CFG=/mnt/cfg/bf01-preview
+if ! awk '$2 == "/mnt/cfg" { found = 1 } END { exit !found }' /proc/mounts; then
+    CFG=/mnt/data/bf01-preview-config
+fi
+if [ -f "$CFG/mode" ]; then
+    read -r MODE < "$CFG/mode" || exit 1
 elif [ -f "$BASE/boot.mode" ]; then
     read -r MODE < "$BASE/boot.mode" || exit 1
 fi
@@ -15,6 +19,44 @@ case "$MODE" in
 esac
 mkdir -p /run/bf01-preview || exit 1
 chmod 700 /run/bf01-preview || exit 1
+exec 6>/run/bf01-preview/supervisor.lock
+flock -n 6 || exit 0
+printf '%s\n' "$$" > /run/bf01-preview/supervisor.pid
+rm -f /run/bf01-preview/supervisor.stop
 export BF01_WIFI_MODE=$MODE
 export LD_LIBRARY_PATH="$BASE/lib:/lib:/usr/lib:/lib/arm-linux-gnueabihf:/lib/3rd:/mnt/system/lib:/mnt/system/usr/lib:${LD_LIBRARY_PATH-}"
-exec "$BASE/ipcamera" -i "$BASE/param_config.ini" >>/run/bf01-preview/service.log 2>&1
+CAMERA_PID=
+WIFI_PID=
+shutdown_camera()
+{
+    touch /run/bf01-preview/supervisor.stop
+    [ -z "$CAMERA_PID" ] || kill -TERM "$CAMERA_PID" 2>/dev/null
+    [ -z "$WIFI_PID" ] || kill -TERM "$WIFI_PID" 2>/dev/null
+    [ -z "$CAMERA_PID" ] || wait "$CAMERA_PID"
+    rm -f /run/bf01-preview/supervisor.pid
+    exit 0
+}
+trap shutdown_camera TERM INT
+if [ -x "$BASE/bf01-wifi" ] && [ "$MODE" != ap ]; then
+    (
+        exec 6>&-
+        while [ ! -f /run/bf01-preview/supervisor.stop ]; do
+            "$BASE/bf01-wifi" start >>/run/bf01-preview/wifi-start.log 2>&1 </dev/null
+            sleep 10
+        done
+    ) &
+    WIFI_PID=$!
+fi
+while [ ! -f /run/bf01-preview/supervisor.stop ]; do
+    if [ -e /run/bf01-preview/boot-camera-started ]; then
+        "$BASE/ipcamera" --live-camera -i "$BASE/param_config.ini" 6>&- >>/run/bf01-preview/service.log 2>&1 &
+    else
+        touch /run/bf01-preview/boot-camera-started
+        "$BASE/ipcamera" -i "$BASE/param_config.ini" 6>&- >>/run/bf01-preview/service.log 2>&1 &
+    fi
+    CAMERA_PID=$!
+    printf '%s\n' "$CAMERA_PID" > /run/bf01-preview/ipcamera.pid
+    wait "$CAMERA_PID"
+    CAMERA_PID=
+    [ -f /run/bf01-preview/supervisor.stop ] || sleep 5
+done

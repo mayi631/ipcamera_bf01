@@ -37,7 +37,7 @@ ROOTFS=$(CDPATH= cd -- "$ROOTFS" && pwd)
     echo 'Refusing to replace an existing /usr/bin/bf01-preview file' >&2
     exit 1
 }
-for FILE in ipcamera param_config.ini bf01_atbm_ap bf01-preview ap.conf capture.ini boot_ai.ini yolov5s_cv181x_bf16.cvimodel lib/libcviruntime.so lib/libcvikernel.so; do
+for FILE in ipcamera param_config.ini bf01_atbm_ap bf01-preview bf01-wifi wifi/bf01-sdio-up.sh wifi/atbm_wifi_ctl wifi/atbm6461_wifi_sdio.ko wifi/cfg80211.ko ap.conf capture.ini boot_ai.ini cloud.ini cloud-ca.pem yolov5s_cv181x_bf16.cvimodel lib/libcviruntime.so lib/libcvikernel.so lib/libssl.so.1.1 lib/libcrypto.so.1.1; do
     [ -f "$SOURCE/$FILE" ] || { echo "Missing $SOURCE/$FILE; build and install IPC first" >&2; exit 1; }
 done
 if [ -n "$AP_CONFIG" ]; then
@@ -53,9 +53,16 @@ install -m 755 "$SOURCE/ipcamera" "$SOURCE/bf01_atbm_ap" "$SOURCE/bf01-preview" 
 install -m 644 "$SOURCE/param_config.ini" "$DEST/param_config.ini"
 install -m 600 "$SOURCE/capture.ini" "$DEST/capture.ini"
 install -m 600 "$SOURCE/boot_ai.ini" "$DEST/boot_ai.ini"
+install -m 600 "$SOURCE/cloud.ini" "$DEST/cloud.ini"
+install -d -m 755 "$DEST/wifi"
+install -m 755 "$SOURCE/bf01-wifi" "$DEST/bf01-wifi"
+install -m 755 "$SOURCE/wifi/bf01-sdio-up.sh" "$SOURCE/wifi/atbm_wifi_ctl" "$DEST/wifi/"
+install -m 644 "$SOURCE/wifi/atbm6461_wifi_sdio.ko" "$SOURCE/wifi/cfg80211.ko" "$DEST/wifi/"
 install -m 644 "$SOURCE/yolov5s_cv181x_bf16.cvimodel" "$DEST/yolov5s_cv181x_bf16.cvimodel"
 install -d -m 755 "$DEST/lib"
 install -m 755 "$SOURCE/lib/libcviruntime.so" "$SOURCE/lib/libcvikernel.so" "$DEST/lib/"
+install -m 755 "$SOURCE/lib/libssl.so.1.1" "$SOURCE/lib/libcrypto.so.1.1" "$DEST/lib/"
+install -m 644 "$SOURCE/cloud-ca.pem" "$DEST/cloud-ca.pem"
 install -m 600 "${AP_CONFIG:-$SOURCE/ap.conf}" "$DEST/ap.conf"
 printf '%s\n' "$BOOT_MODE" > "$DEST/boot.mode"
 install -m 755 "$RESOURCE/S99zpreview" "$ROOTFS/etc/init.d/S99zpreview"

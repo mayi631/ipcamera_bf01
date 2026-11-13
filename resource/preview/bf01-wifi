@@ -1,0 +1,144 @@
+#!/bin/sh
+
+set -eu
+umask 077
+BASE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+RUN=/run/ipcamera-wifi
+export LD_LIBRARY_PATH="$BASE/lib:/lib:/usr/lib:/lib/arm-linux-gnueabihf:/lib/3rd:/mnt/system/lib:/mnt/system/usr/lib:${LD_LIBRARY_PATH-}"
+if [ -f /mnt/data/ipcamera-wifi/trace-full ]; then
+    export BF01_WIFI_TRACE=1
+fi
+
+running()
+{
+    [ -r "$RUN/service.pid" ] || return 1
+    read -r SERVICE_PID < "$RUN/service.pid" || return 1
+    case "$SERVICE_PID" in ''|*[!0-9]*) return 1 ;; esac
+    [ -r "/proc/$SERVICE_PID/cmdline" ] || return 1
+    [ "$(readlink -f "/proc/$SERVICE_PID/exe")" = "$(readlink -f "$BASE/ipcamera")" ] || return 1
+    tr '\000' '\n' < "/proc/$SERVICE_PID/cmdline" | grep -Fxq -- --wifi-service || return 1
+    kill -0 "$SERVICE_PID" 2>/dev/null
+}
+
+log_stage()
+{
+    read -r STAGE_UPTIME STAGE_REST < /proc/uptime
+    echo "[wifi-startup uptime=${STAGE_UPTIME}s] $*"
+}
+
+start_clock()
+{
+    if [ "$(date +%s)" -lt 1577836800 ]; then
+        nohup flock -n "$RUN/clock.lock" "$BASE/bf01-wifi" _clock wait-network \
+            </dev/null >>"$RUN/clock.log" 2>&1 8>&- &
+    fi
+}
+
+case "${1:-status}" in
+    start)
+        mkdir -p "$RUN"
+        chmod 700 "$RUN"
+        exec 8>"$RUN/start.lock"
+        flock -n 8 || { echo 'Production Wi-Fi startup already in progress'; exit 0; }
+        if running; then
+            start_clock
+            echo "Production Wi-Fi service already running: $SERVICE_PID"
+            exit 0
+        fi
+        if [ ! -d /sys/module/atbm6461_wifi_sdio ]; then
+            STARTUP_AFTER=0
+            if [ -r /mnt/data/ipcamera-wifi/startup-not-before ]; then
+                read -r STARTUP_AFTER < /mnt/data/ipcamera-wifi/startup-not-before
+            fi
+            case "$STARTUP_AFTER" in ''|*[!0-9]*) exit 1 ;; esac
+            [ "$STARTUP_AFTER" -le 120 ] || exit 1
+            read -r UPTIME REST < /proc/uptime
+            UPTIME=${UPTIME%%.*}
+            if [ "$UPTIME" -lt "$STARTUP_AFTER" ]; then
+                log_stage "Explicit startup-not-before override: $STARTUP_AFTER seconds"
+                sleep "$((STARTUP_AFTER - UPTIME))"
+            fi
+        fi
+        log_stage 'Starting SDIO readiness check'
+        "$BASE/wifi/bf01-sdio-up.sh" network-start 8>&- >>"$RUN/network.log" 2>&1 || {
+            log_stage "SDIO or network watcher not ready; startup will retry, inspect $RUN/network.log"
+            exit 1
+        }
+        start_clock
+        log_stage 'Starting protocol service without waiting for IP or clock'
+        nohup "$BASE/ipcamera" --wifi-service </dev/null >>"$RUN/service.log" 2>&1 8>&- &
+        CHILD=$!
+        COUNT=0
+        while ! running; do
+            kill -0 "$CHILD" 2>/dev/null || exit 1
+            [ "$COUNT" -lt 5 ] || exit 1
+            sleep 1
+            COUNT=$((COUNT + 1))
+        done
+        log_stage "Production Wi-Fi service started: $SERVICE_PID"
+        ;;
+    stop)
+        if running; then
+            kill -TERM "$SERVICE_PID"
+            COUNT=0
+            while kill -0 "$SERVICE_PID" 2>/dev/null; do
+                [ "$COUNT" -lt 20 ] || { echo 'Service is still completing an SDIO exchange' >&2; exit 1; }
+                sleep 1
+                COUNT=$((COUNT + 1))
+            done
+        fi
+        ;;
+    status) exec "$BASE/ipcamera" --wifi-status ;;
+    get)
+        [ "$#" -eq 2 ] || { echo 'Usage: bf01-wifi get NAME (queued through the production service)' >&2; exit 2; }
+        exec "$BASE/ipcamera" --wifi-get "$2"
+        ;;
+    refresh-http) exec "$BASE/ipcamera" --wifi-refresh-http ;;
+    filter) exec "$BASE/ipcamera" --wifi-filter ;;
+    camera-status) exec "$BASE/ipcamera" --wifi-camera-status ;;
+    module-time) exec "$BASE/ipcamera" --wifi-module-time ;;
+    speaker-status) exec "$BASE/ipcamera" --wifi-speaker-status ;;
+    microphone-status) exec "$BASE/ipcamera" --wifi-microphone-status ;;
+    sync-clock)
+        mkdir -p "$RUN"
+        exec flock -n "$RUN/clock.lock" "$BASE/bf01-wifi" _clock
+        ;;
+    _clock)
+        [ "$(id -u)" = 0 ] || exit 1
+        if [ "$(date +%s)" -ge 1577836800 ]; then
+            echo '[wifi-clock] UTC already valid; no adjustment'
+            exit 0
+        fi
+        if [ "${2:-}" = wait-network ]; then
+            log_stage 'Clock worker waiting for network address, route and DNS'
+            COUNT=0
+            while [ ! -f /run/atbm_wifi/watcher.ready ] || [ ! -f /run/atbm_wifi/network.ready ]; do
+                [ "$(date +%s)" -lt 1577836800 ] || exit 0
+                [ "$COUNT" -lt 30 ] || { log_stage 'Network not ready for clock sync; supervisor will retry'; exit 1; }
+                sleep 1
+                COUNT=$((COUNT + 1))
+            done
+        fi
+        log_stage 'Starting fast TCP clock synchronization'
+        if timeout 8 "$BASE/ipcamera" --wifi-sync-time; then
+            if [ "$(date +%s)" -ge 1577836800 ]; then
+                log_stage 'UTC ready from TCP time source'
+                exit 0
+            fi
+        fi
+        [ "$(date +%s)" -lt 1577836800 ] || exit 0
+        echo '[wifi-clock] starting NTP; bounded wait 20 seconds'
+        if timeout 20 busybox ntpd -d -n -q -p ntp.aliyun.com -p time.cloudflare.com; then
+            echo '[wifi-clock] NTP command completed'
+        else
+            echo '[wifi-clock] NTP did not finish within the bounded attempt'
+        fi
+        if [ "$(date +%s)" -ge 1577836800 ]; then
+            log_stage 'UTC ready from NTP'
+            exit 0
+        fi
+        log_stage 'Clock synchronization failed; supervisor will retry without bypassing HTTP clock checks'
+        exit 1
+        ;;
+    *) echo 'Usage: bf01-wifi {start|stop|status|get NAME|refresh-http|filter|camera-status|module-time|speaker-status|microphone-status|sync-clock}' >&2; exit 2 ;;
+esac

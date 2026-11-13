@@ -18,14 +18,15 @@
 #include "app_ipcam_capture.h"
 #include "app_ipcam_mp4.h"
 #include "app_ipcam_storage.h"
+#include "app_ipcam_microphone.h"
 #include "app_ipcam_boot_capture.h"
 #include "app_ipcam_boot_ai.h"
 #include "app_ipcam_paramparse.h"
 #include "cvi_mbuf.h"
 #include "minIni.h"
+#include "app_ipcam_event.h"
 
 #define CAPTURE_RUN "/run/ipcamera-capture"
-#define CAPTURE_CFG "/mnt/cfg/ipcamera"
 #define CAPTURE_STORAGE APP_STORAGE_MOUNT
 #define CAPTURE_TASK_ROOT CAPTURE_STORAGE "/.capture"
 #define CAPTURE_MEDIA_ROOT CAPTURE_STORAGE "/DCIM"
@@ -36,6 +37,10 @@ static pthread_t capture_thread;
 static pthread_mutex_t capture_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int capture_started;
 static int capture_stopping;
+static int capture_finished = 1;
+static int capture_discard_error;
+static int capture_discard_requested;
+static cJSON *capture_event;
 
 struct capture_task {
     int seconds;
@@ -65,31 +70,24 @@ static uint64_t monotonic_ms(void)
     return (uint64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
 }
 
+static int capture_discarding(void)
+{
+    int live = app_event_live();
+    pthread_mutex_lock(&capture_mutex);
+    if (live)
+        capture_discard_requested = 1;
+    int discard = capture_discard_requested;
+    pthread_mutex_unlock(&capture_mutex);
+    return discard;
+}
+
 static int capture_cancelled(void)
 {
+    int discard = capture_discarding();
     pthread_mutex_lock(&capture_mutex);
     int stopping = capture_stopping;
     pthread_mutex_unlock(&capture_mutex);
-    return stopping;
-}
-
-static int mounted_at(const char *path, int writable)
-{
-    FILE *mounts = setmntent("/proc/mounts", "r");
-    if (!mounts)
-        return 0;
-    struct mntent entry;
-    struct mntent *result;
-    char buffer[4096];
-    int found = 0;
-    while ((result = getmntent_r(mounts, &entry, buffer, sizeof(buffer))) != NULL) {
-        if (!strcmp(result->mnt_dir, path) && (!writable || !hasmntopt(result, "ro"))) {
-            found = 1;
-            break;
-        }
-    }
-    endmntent(mounts);
-    return found;
+    return stopping || discard;
 }
 
 static int parse_number(const char *text, int minimum, int maximum, int *value)
@@ -107,12 +105,12 @@ static int resolve_capture_config(char *config, size_t capacity)
 {
     if (!config || capacity == 0)
         return -1;
-    int length = snprintf(config, capacity, "%s/capture.ini", CAPTURE_CFG);
-    if (length < 0 || (size_t)length >= capacity)
+    int error = app_event_config_path("capture.ini", config, capacity);
+    if (error && error != ENODEV)
         return -1;
-    if (access(config, F_OK) == 0)
+    if (!error && access(config, F_OK) == 0)
         return 0;
-    if (errno != ENOENT)
+    if (!error && errno != ENOENT)
         return -1;
     ssize_t link_length = readlink("/proc/self/exe", config, capacity - 1);
     if (link_length <= 0 || (size_t)link_length >= capacity - 1)
@@ -335,20 +333,19 @@ static int next_media_path(const char *directory, const char *extension, char *p
 static int update_status(const struct capture_task *task, const char *state, int error, int persistent)
 {
     char text[PATH_MAX * 7 + 2048];
+    const char *ai_state = app_event_text(cJSON_GetObjectItemCaseSensitive(capture_event, "ai"), "state");
+    if (!*ai_state)
+        ai_state = !strcmp(state, "awaiting_ai") ? "pending" : "not_submitted";
     uint64_t photoElapsed = task->photo_ready_ms ? task->photo_ready_ms - task->photo_started_ms : 0;
     uint64_t elapsed = (task->completed_ms ? task->completed_ms : monotonic_ms()) - task->started_ms;
     int length = snprintf(text, sizeof(text),
         "[task]\nstate=%s\nerror=%d\nduration_seconds=%d\nchannel=%d\n"
-        "directory=%s\nphoto=%s\nvideo=%s\nai_state=%s\nupload_decision=pending\n"
+            "directory=%s\nphoto=%s\nvideo=%s\nai_state=%s\nupload_decision=event_manifest\n"
         "task_started_uptime_ms=%llu\nstorage_ready_uptime_ms=%llu\nphoto_elapsed_ms=%llu\n"
         "photo_ready_uptime_ms=%llu\nrecording_started_uptime_ms=%llu\ncompleted_uptime_ms=%llu\n"
         "recorded_ms=%llu\nvideo_bytes=%llu\nelapsed_ms=%llu\n",
         state, error, task->seconds, task->channel, task->directory, task->photo, task->video,
-#ifdef BF01_BOOT_CAPTURE
-        app_ipcam_BootAi_Allowed() ? "passed" : "not_submitted",
-#else
-        !strcmp(state, "awaiting_ai") ? "pending" : "not_submitted",
-#endif
+        ai_state,
         (unsigned long long)task->started_ms, (unsigned long long)task->storage_ready_ms,
         (unsigned long long)photoElapsed, (unsigned long long)task->photo_ready_ms,
         (unsigned long long)task->recording_started_ms, (unsigned long long)task->completed_ms,
@@ -426,6 +423,19 @@ int app_ipcam_Capture_LoadAiEnabled(int *enabled)
 {
     if (!enabled)
         return -1;
+    char policy_path[PATH_MAX];
+    int policy_error = app_event_config_path("event-policy.json", policy_path, sizeof(policy_path));
+    if (policy_error && policy_error != ENODEV)
+        return policy_error;
+    if (!policy_error && access(policy_path, F_OK) == 0) {
+        struct app_event_policy policy;
+        int error = app_event_policy_load(&policy);
+        if (!error)
+            *enabled = policy.ai_enabled;
+        return error;
+    }
+    if (!policy_error && errno != ENOENT)
+        return errno;
     char config[PATH_MAX];
     int config_result = resolve_capture_config(config, sizeof(config));
     if (config_result < 0)
@@ -450,18 +460,20 @@ int app_ipcam_Capture_Configure(const char *seconds, const char *channel)
         fprintf(stderr, "Usage: ipcamera --capture-config SECONDS(1-300) CHANNEL(0-2)\n");
         return -1;
     }
-    if (!mounted_at("/mnt/cfg", 1) ||
-        (mkdir(CAPTURE_CFG, 0700) != 0 && errno != EEXIST)) {
-        fprintf(stderr, "[capture] writable /mnt/cfg must be mounted before saving settings\n");
-        return -1;
-    }
+    char config[PATH_MAX];
+    int config_error = app_event_config_path("capture.ini", config, sizeof(config));
+    if (config_error)
+        return config_error;
+    config_error = app_event_config_prepare();
+    if (config_error)
+        return config_error;
     char text[128];
     int ai_enabled = 1;
     if (app_ipcam_Capture_LoadAiEnabled(&ai_enabled) != 0)
         ai_enabled = 1;
     snprintf(text, sizeof(text), "[capture]\nenabled=1\nai_enabled=%d\nduration_seconds=%d\nchannel=%d\n",
         ai_enabled, duration, selected);
-    if (save_file(CAPTURE_CFG "/capture.ini", text) != 0)
+    if (save_file(config, text) != 0)
         return -1;
     printf("[capture] saved duration=%ds channel=%d; applies on the next application start\n", duration, selected);
     return 0;
@@ -500,7 +512,16 @@ static int record_audio(struct app_mp4 *output, int64_t clock_offset, int boot_v
             (clock_offset < 0 && frame.pts < (uint64_t)-clock_offset))
             return EIO;
         uint64_t pts = (uint64_t)((int64_t)frame.pts + clock_offset);
-        if (app_mp4_write_pcm(output, frame.samples, frame.count, pts) != 0)
+#ifdef BF01_AUDIO_DUPLEX
+        int microphone_guard = app_ipcam_Microphone_GuardFrame(frame.samples, frame.count);
+        if (microphone_guard < 0)
+            return -microphone_guard;
+#endif
+        int written = app_mp4_write_pcm(output, frame.samples, frame.count, pts);
+#ifdef BF01_AUDIO_DUPLEX
+        close(microphone_guard);
+#endif
+        if (written != 0)
             return EIO;
         if (app_mp4_audio_complete(output))
             break;
@@ -511,6 +532,13 @@ static int record_audio(struct app_mp4 *output, int64_t clock_offset, int boot_v
 
 static int record_clip(struct capture_task *task)
 {
+    if (!task->seconds)
+    {
+#ifdef BF01_BOOT_CAPTURE
+        app_ipcam_BootVideo_Stop();
+#endif
+        return 0;
+    }
     APP_PARAM_VENC_CTX_S *context = app_ipcam_Venc_Param_Get();
     if (task->channel >= context->s32VencChnCnt)
         return EINVAL;
@@ -820,7 +848,7 @@ static int save_boot_burst(struct capture_task *task)
 }
 #endif
 
-static void *capture_boot_task(void *opaque)
+static void *capture_boot_run(void *opaque)
 {
     struct capture_task task = { .seconds = 10, .channel = 0, .started_ms = monotonic_ms() };
     int enabled;
@@ -846,8 +874,27 @@ static void *capture_boot_task(void *opaque)
     if (!enabled) {
 #ifdef BF01_BOOT_CAPTURE
         app_ipcam_BootVideo_Stop();
+        app_ipcam_BootCapture_Discard();
 #endif
         task_status(&task, "disabled", 0);
+        return NULL;
+    }
+    char policy_path[PATH_MAX];
+    int policy_error = app_event_config_path("event-policy.json", policy_path, sizeof(policy_path));
+    if (policy_error && policy_error != ENODEV) {
+        task_status(&task, "failed", policy_error);
+        return NULL;
+    }
+    if (!policy_error && access(policy_path, F_OK) == 0) {
+        struct app_event_policy policy;
+        error = app_event_policy_load(&policy);
+        if (error) {
+            task_status(&task, "failed", error);
+            return NULL;
+        }
+        task.seconds = policy.record_seconds;
+    } else if (!policy_error && errno != ENOENT) {
+        task_status(&task, "failed", errno);
         return NULL;
     }
 #ifdef BF01_BOOT_CAPTURE
@@ -859,6 +906,23 @@ static void *capture_boot_task(void *opaque)
         task_status(&task, error == EALREADY ? "photos_already_saved" :
             error == ECANCELED ? "interrupted" : "failed", error);
         return NULL;
+    }
+    if (capture_event) {
+        CVI_U64 current_pts = 0;
+        uint64_t first_pts = ((uint64_t)task.burst.images[0].pts_high << 32) | task.burst.images[0].pts_low;
+        uint64_t uptime_ms = monotonic_ms();
+        double captured_ms = -1, event_ms = 0;
+        if (CVI_SYS_GetCurPTS(&current_pts) == CVI_SUCCESS && current_pts >= first_pts &&
+            (current_pts - first_pts) / 1000 <= uptime_ms) {
+            uint64_t elapsed_ms = (current_pts - first_pts) / 1000;
+            captured_ms = (double)(uptime_ms - elapsed_ms);
+            uint64_t realtime_ms = app_event_realtime();
+            if (realtime_ms >= 1577836800000ULL + elapsed_ms)
+                event_ms = (double)(realtime_ms - elapsed_ms);
+        }
+        cJSON_SetNumberValue(cJSON_GetObjectItemCaseSensitive(capture_event, "captureUptimeMs"), captured_ms);
+        cJSON_SetNumberValue(cJSON_GetObjectItemCaseSensitive(capture_event, "eventTime"), event_ms);
+        cJSON_AddNumberToObject(capture_event, "capturePtsUs", (double)first_pts);
     }
 wait_for_storage:
 #endif
@@ -951,6 +1015,18 @@ wait_for_storage:
     error = record_clip(&task);
     if (error)
         goto failed;
+    if (capture_event && !capture_cancelled()) {
+        if (task.seconds)
+            cJSON_AddNumberToObject(capture_event, "videoDuration", (double)task.recorded_ms / 1000.0);
+        int photo_error = app_event_media(task.directory, capture_event, "image", task.photo);
+        int video_error = task.seconds ? app_event_media(task.directory, capture_event, "cloud_video", task.video) : 0;
+        if (photo_error || video_error)
+            fprintf(stderr, "[upload] queue failed photo_errno=%d video_errno=%d; media retained\n", photo_error, video_error);
+    }
+    if (capture_cancelled()) {
+        error = ECANCELED;
+        goto failed;
+    }
 #ifdef BF01_BOOT_CAPTURE
     const char *completed_state = "completed";
 #else
@@ -962,6 +1038,31 @@ wait_for_storage:
     }
     error = EIO;
 failed:
+    if (capture_discarding()) {
+#ifdef BF01_BOOT_CAPTURE
+        for (unsigned int index = 0; index < BF01_BURST_COUNT; index++) {
+            if (*task.photos[index])
+                unlink(task.photos[index]);
+        }
+#else
+        if (*task.photo)
+            unlink(task.photo);
+#endif
+        char partial[PATH_MAX];
+        if (*task.video)
+            unlink(task.video);
+        if (*task.video && snprintf(partial, sizeof(partial), "%s.part", task.video) < (int)sizeof(partial))
+            unlink(partial);
+        if (*task.directory) {
+            if (snprintf(partial, sizeof(partial), "%s/image.upload.json", task.directory) < (int)sizeof(partial))
+                unlink(partial);
+            if (snprintf(partial, sizeof(partial), "%s/cloud_video.upload.json", task.directory) < (int)sizeof(partial))
+                unlink(partial);
+        }
+        task_status(&task, "discarded_for_live", ECANCELED);
+    } else if (capture_event && *task.photo && !capture_cancelled()) {
+        app_event_media(task.directory, capture_event, "image", task.photo);
+    }
 #ifdef BF01_BOOT_CAPTURE
     if (!photos_saved && !capture_cancelled() &&
         (error == EIO || error == ENODEV || error == EROFS || error == ENOSPC)) {
@@ -988,6 +1089,54 @@ failed:
     return NULL;
 }
 
+static void *capture_boot_task(void *opaque)
+{
+    int discard_error = 0;
+    int error = app_event_begin(&capture_event);
+    if (error)
+        fprintf(stderr, "[upload] event metadata unavailable errno=%d; no fabricated detection\n", error);
+    capture_boot_run(opaque);
+#ifdef BF01_BOOT_CAPTURE
+    if (capture_discarding()) {
+        discard_error = app_ipcam_BootCapture_Discard();
+        int video_error = app_ipcam_BootVideo_Stop();
+        if (!discard_error)
+            discard_error = video_error;
+    }
+#endif
+    cJSON_Delete(capture_event);
+    capture_event = NULL;
+    pthread_mutex_lock(&capture_mutex);
+    capture_discard_error = discard_error;
+    capture_finished = 1;
+    pthread_mutex_unlock(&capture_mutex);
+    return NULL;
+}
+
+int app_ipcam_Capture_Quiesce(void)
+{
+    pthread_mutex_lock(&capture_mutex);
+    capture_stopping = 1;
+    capture_discard_requested = 1;
+    int ready = capture_finished;
+    int error = capture_discard_error;
+    pthread_mutex_unlock(&capture_mutex);
+    if (!ready)
+        return EINPROGRESS;
+#ifdef BF01_BOOT_CAPTURE
+    if (error) {
+        error = app_ipcam_BootCapture_Discard();
+        int video_error = app_ipcam_BootVideo_Stop();
+        if (!error)
+            error = video_error;
+        pthread_mutex_lock(&capture_mutex);
+        capture_discard_error = error;
+        pthread_mutex_unlock(&capture_mutex);
+    }
+#endif
+    return error;
+}
+
 int app_ipcam_Capture_Start(void)
 {
     if (mkdir(CAPTURE_RUN, 0700) != 0 && errno != EEXIST)
@@ -998,9 +1147,14 @@ int app_ipcam_Capture_Start(void)
         return 0;
     }
     capture_stopping = 0;
+    capture_finished = 0;
+    capture_discard_error = 0;
+    capture_discard_requested = 0;
     int result = pthread_create(&capture_thread, NULL, capture_boot_task, NULL);
     if (!result)
         capture_started = 1;
+    else
+        capture_finished = 1;
     pthread_mutex_unlock(&capture_mutex);
     return result;
 }
