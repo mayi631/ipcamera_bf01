@@ -14,6 +14,7 @@
 #include "app_ipcam_event.h"
 
 #define LIVE_FILE "/run/ipcamera-wifi/live-mode"
+#define BOOT_CANCEL_FILE "/run/ipcamera-wifi/boot-media-cancelled"
 
 static int config_directory(char *directory, size_t capacity, int create)
 {
@@ -271,12 +272,21 @@ int app_event_live(void)
     return access(LIVE_FILE, F_OK) == 0;
 }
 
+int app_event_boot_cancelled(void)
+{
+    return app_event_live() || access(BOOT_CANCEL_FILE, F_OK) == 0;
+}
+
 int app_event_set_live(int enabled)
 {
     if (!enabled)
         return unlink(LIVE_FILE) && errno != ENOENT ? errno : 0;
     if (mkdir("/run/ipcamera-wifi", 0700) && errno != EEXIST)
         return errno;
+    int cancelled = open(BOOT_CANCEL_FILE, O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (cancelled < 0)
+        return errno;
+    close(cancelled);
     int descriptor = open(LIVE_FILE, O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
     if (descriptor < 0)
         return errno;

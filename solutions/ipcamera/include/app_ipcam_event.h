@@ -20,6 +20,7 @@ int app_event_config_prepare(void);
 int app_event_policy_load(struct app_event_policy *policy);
 int app_event_policy_apply(const cJSON *changes);
 int app_event_live(void);
+int app_event_boot_cancelled(void);
 int app_event_set_live(int enabled);
 int app_event_begin(cJSON **event);
 int app_event_media(const char *directory, cJSON *event, const char *purpose, const char *path);

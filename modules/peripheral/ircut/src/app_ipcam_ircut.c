@@ -45,8 +45,20 @@ static CVI_BOOL g_bIRCut_Running;
 static APP_PARAM_IRCUT_STATUS_S g_stIRCutCtrl = {0};
 static CVI_GPIO_NUM_E IR_CUT_A, IR_CUT_B, IR_LED;
 
+static int ircut_gpio_enabled(void)
+{
+#ifdef BF01_IRCUT_GPIO_DISABLED
+    return 0;
+#else
+    return 1;
+#endif
+}
+
 int app_ipcam_IRCut_Switch(CVI_GPIO_NUM_E IR_CUT_A, CVI_GPIO_NUM_E IR_CUT_B, CVI_BOOL bEnable)
 {
+    if (!ircut_gpio_enabled())
+        return CVI_SUCCESS;
+
     if (!g_pstIrCutCfg->bInit) {
         app_ipcam_Gpio_Export(IR_CUT_A);
         app_ipcam_Gpio_Dir_Set(IR_CUT_A, CVI_GPIO_DIR_OUT);
@@ -104,7 +116,8 @@ void app_ipcam_IRCutMode_ManualCtrl(CVI_S32 value, CVI_S32 state)
                 /* open ir filter*/
                 app_ipcam_IRCut_Switch(IR_CUT_A, IR_CUT_B, IR_CUT_OPEN);
                 /* close ir-led */
-                app_ipcam_Gpio_Value_Set(IR_LED, CVI_GPIO_VALUE_L);
+                if (ircut_gpio_enabled())
+                    app_ipcam_Gpio_Value_Set(IR_LED, CVI_GPIO_VALUE_L);
                 /* load PQ parameter */
                 #ifdef ANONMSG_ENABLE
                 for (CVI_U32 i = 0; i < pstViCtx->u32WorkSnsCnt; i++) {
@@ -124,7 +137,8 @@ void app_ipcam_IRCutMode_ManualCtrl(CVI_S32 value, CVI_S32 state)
                 /* close ir filter*/
                 app_ipcam_IRCut_Switch(IR_CUT_A, IR_CUT_B, IR_CUT_CLOSE);
                 /* open ir-led */
-                app_ipcam_Gpio_Value_Set(IR_LED, CVI_GPIO_VALUE_H);
+                if (ircut_gpio_enabled())
+                    app_ipcam_Gpio_Value_Set(IR_LED, CVI_GPIO_VALUE_H);
                 g_pstIrCutCfg->bDayMode = CVI_FALSE;
                 g_pstIrCutCfg->bNightMode = CVI_TRUE;
             }
@@ -173,7 +187,8 @@ static CVI_VOID *ThreadIRCutAutoSwitch(void *arg)
                     /* open ir filter*/
                     app_ipcam_IRCut_Switch(IR_CUT_A, IR_CUT_B, IR_CUT_OPEN);
                     /* close ir-led */
-                    app_ipcam_Gpio_Value_Set(IR_LED, CVI_GPIO_VALUE_L);
+                    if (ircut_gpio_enabled())
+                        app_ipcam_Gpio_Value_Set(IR_LED, CVI_GPIO_VALUE_L);
                     /* load PQ parameter */
 #ifdef ANONMSG_ENABLE
                     for (CVI_U32 i = 0; i < pstViCtx->u32WorkSnsCnt; i++) {
@@ -209,7 +224,8 @@ static CVI_VOID *ThreadIRCutAutoSwitch(void *arg)
                     /* close ir filter*/
                     app_ipcam_IRCut_Switch(IR_CUT_A, IR_CUT_B, IR_CUT_CLOSE);
                     /* open ir-led */
-                    app_ipcam_Gpio_Value_Set(IR_LED, CVI_GPIO_VALUE_H);
+                    if (ircut_gpio_enabled())
+                        app_ipcam_Gpio_Value_Set(IR_LED, CVI_GPIO_VALUE_H);
                     g_pstIrCutCfg->bDayMode = CVI_FALSE;
                     g_pstIrCutCfg->bNightMode = CVI_TRUE;
                     checkNightCount = 0;
@@ -263,7 +279,11 @@ int app_ipcam_IRCut_Init(void)
     IR_CUT_B = psGpioCfg->IR_CUT_B;
     IR_LED   = psGpioCfg->LED_IR;
 
-    APP_PROF_LOG_PRINT(LEVEL_INFO, "gpio num ir_a=%d ir_b=%d ir_led=%d\n", IR_CUT_A, IR_CUT_B, IR_LED);
+    if (ircut_gpio_enabled()) {
+        APP_PROF_LOG_PRINT(LEVEL_INFO, "gpio num ir_a=%d ir_b=%d ir_led=%d\n", IR_CUT_A, IR_CUT_B, IR_LED);
+    } else {
+        APP_PROF_LOG_PRINT(LEVEL_INFO, "BF01 mechanical IR-CUT GPIO disabled; software day/night control retained\n");
+    }
 
     app_ipcam_IRCut_Switch(IR_CUT_A, IR_CUT_B, IR_CUT_OPEN);
 
@@ -287,12 +307,14 @@ int app_ipcam_IrCut_DeInit(void)
         g_pthIRCut = 0;
     }
 
-    app_ipcam_Gpio_Value_Set(IR_CUT_A, CVI_GPIO_VALUE_L);
-    app_ipcam_Gpio_Value_Set(IR_CUT_B, CVI_GPIO_VALUE_L);
-    app_ipcam_Gpio_Value_Set(IR_LED, CVI_GPIO_VALUE_L);
-    app_ipcam_Gpio_Unexport(IR_CUT_A);
-    app_ipcam_Gpio_Unexport(IR_CUT_B);
-    app_ipcam_Gpio_Unexport(IR_LED);
+    if (ircut_gpio_enabled()) {
+        app_ipcam_Gpio_Value_Set(IR_CUT_A, CVI_GPIO_VALUE_L);
+        app_ipcam_Gpio_Value_Set(IR_CUT_B, CVI_GPIO_VALUE_L);
+        app_ipcam_Gpio_Value_Set(IR_LED, CVI_GPIO_VALUE_L);
+        app_ipcam_Gpio_Unexport(IR_CUT_A);
+        app_ipcam_Gpio_Unexport(IR_CUT_B);
+        app_ipcam_Gpio_Unexport(IR_LED);
+    }
 
     g_pstIrCutCfg->bInit = CVI_FALSE;
 

@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -64,6 +65,7 @@ static int stream_session(void)
             error = EIO;
     }
     uint64_t progress = stream_clock();
+    int first_frame_sent = 0;
     uint64_t previous_pts = 0;
     uint32_t previous_index = 0;
     uint64_t recovery_started = 0;
@@ -145,6 +147,12 @@ static int stream_session(void)
         error = bf01_rtsp_publish_frame(publisher, frame.frameBuf, frame.frameParam.frameLen, previous_pts);
         if (error)
             break;
+        if (!first_frame_sent) {
+            int readiness = open("/run/ipcamera-wifi/live-first-frame", O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+            if (readiness >= 0)
+                close(readiness);
+            first_frame_sent = 1;
+        }
         progress = stream_clock();
         previous_index = frame_index;
         if (recovery_started) {

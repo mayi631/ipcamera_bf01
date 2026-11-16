@@ -95,6 +95,8 @@ static uint64_t monotonic_us(void)
 
 static int interrupted(void)
 {
+    if (app_event_boot_cancelled())
+        return 1;
     sigset_t pending;
     if (sigpending(&pending) != 0)
         return 1;
@@ -392,6 +394,8 @@ static int read_test_input(const char *path, float *input)
 
 static int infer_frame(const struct ai_job *job, struct ai_result *result)
 {
+    if (interrupted())
+        return ECANCELED;
     int error = preflight(&job->frame);
     if (error)
         return error;
@@ -418,8 +422,16 @@ static int infer_frame(const struct ai_job *job, struct ai_result *result)
         error = ENOSYS;
         goto done;
     }
+    if (interrupted()) {
+        error = ECANCELED;
+        goto done;
+    }
     if (runtime.register_model(job->model, &model) != 0) {
         error = EIO;
+        goto done;
+    }
+    if (interrupted()) {
+        error = ECANCELED;
         goto done;
     }
     CVI_TENSOR *inputs = NULL;
@@ -677,7 +689,15 @@ int app_ipcam_BootAi_Run(void)
     }
     uint64_t deadline = monotonic_us() + (uint64_t)AI_TOTAL_TIMEOUT_MS * 1000;
     report("waiting_for_frame", 0, &result, &job);
-    error = load_job(&job);
+    if (interrupted())
+        error = ECANCELED;
+    if (!error && access("/sys/module/cv181x_tpu", F_OK) != 0 &&
+        access("/system/ko/bf01-modules", X_OK) == 0) {
+        int loaded = system("/system/ko/bf01-modules ai");
+        error = interrupted() ? ECANCELED : loaded ? EIO : 0;
+    }
+    if (!error)
+        error = load_job(&job);
     while (!error) {
         if (interrupted()) {
             error = ECANCELED;
@@ -735,7 +755,8 @@ int app_ipcam_BootAi_Run(void)
         ai_allowed = 1;
     if (!error && !result.passed)
         error = ENODATA;
-    report(ai_allowed ? "passed" : (error == ENODATA ? "rejected" : "failed"), error, &result, &job);
+    report(ai_allowed ? "passed" : (error == ENODATA ? "rejected" :
+        error == ECANCELED ? "cancelled" : "failed"), error, &result, &job);
     CVI_IPCM_DeregisterAnonHandle(BF01_AI_PORT);
     return error;
 }

@@ -8,4 +8,8 @@ ODIR 	+= $(CURDIR)/obj
 #DEPEND
 INCS	+= -I$(CURDIR)/include
 
+ifeq ($(CONFIG_RESOURCE_INSTALL_FBM_CV1815JA_BF01_GC4683),y)
+CFLAGS += -DBF01_IRCUT_GPIO_DISABLED
+endif
+
 include $(SRCTREE)/build/build.mk

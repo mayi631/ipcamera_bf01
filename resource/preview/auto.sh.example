@@ -47,6 +47,14 @@ if [ -x "$BASE/bf01-wifi" ] && [ "$MODE" != ap ]; then
         done
     ) &
     WIFI_PID=$!
+    read -r WAIT_UPTIME REST < /proc/uptime
+    WAIT_DEADLINE=$((${WAIT_UPTIME%%.*} + 8))
+    while [ ! -S /run/ipcamera-wifi/control.sock ]; do
+        [ ! -e /run/bf01-poweroff/requested ] || shutdown_camera
+        read -r WAIT_UPTIME REST < /proc/uptime
+        [ "${WAIT_UPTIME%%.*}" -lt "$WAIT_DEADLINE" ] || break
+        sleep 0.05
+    done
 fi
 while [ ! -f /run/bf01-preview/supervisor.stop ] && [ ! -e /run/bf01-poweroff/requested ]; do
     if [ -e /run/bf01-preview/boot-camera-started ]; then

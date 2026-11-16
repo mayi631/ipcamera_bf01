@@ -6,6 +6,9 @@
 #include <signal.h>
 #include <errno.h>
 #include <time.h>
+#include <poll.h>
+#include <sys/signalfd.h>
+#include <fcntl.h>
 #include "app_ipcam_paramparse.h"
 #include "cvi_mbuf.h"
 #include "app_ipcam_preview.h"
@@ -341,20 +344,19 @@ int main(int argc, char *argv[])
     if (!live_only) {
         app_ipcam_BootTimestampPoll();
         int gate_result = 0;
-        if (!app_event_live())
+        if (!app_event_boot_cancelled())
             gate_result = boot_ai_enabled ? app_ipcam_BootAi_Run() : app_ipcam_BootAi_Bypass();
-        if (gate_result) {
+        if (app_event_boot_cancelled()) {
+            app_ipcam_BootAi_Discard();
+            app_ipcam_BootCapture_Discard();
+            app_ipcam_BootVideo_Stop();
+            boot_capture_allowed = 0;
+        } else if (gate_result) {
             fprintf(stderr, "[boot-ai] gate closed: error=%d; stop recording, no SD media writes\n", gate_result);
             app_ipcam_BootVideo_UnInit();
             app_ipcam_BootCapture_UnInit();
             boot_capture_allowed = 0;
             fprintf(stderr, "[boot-ai] media gate closed; camera control remains available for APP live\n");
-        }
-        if (!gate_result && app_event_live()) {
-            APP_CHK_RET(app_ipcam_BootAi_Discard(), "discard AI input before live");
-            APP_CHK_RET(app_ipcam_BootCapture_Discard(), "discard boot photos before live");
-            APP_CHK_RET(app_ipcam_BootVideo_Stop(), "discard boot video before live");
-            boot_capture_allowed = 0;
         }
     } else {
         APP_CHK_RET(app_ipcam_BootAi_Discard(), "discard AI input on camera recovery");
@@ -386,7 +388,7 @@ int main(int argc, char *argv[])
     APP_CHK_RET(app_ipcam_Venc_Start(APP_VENC_ALL), "start video processing");
 
     APP_CHK_RET(app_ipcam_Storage_Start(), "start SD storage monitor");
-    if (!live_only && boot_capture_allowed) {
+    if (!live_only && boot_capture_allowed && !app_event_boot_cancelled()) {
         APP_CHK_RET(app_ipcam_Capture_Start(), "start boot capture workflow");
     }
 
@@ -440,11 +442,34 @@ int main(int argc, char *argv[])
     /* enable receive a command form another progress for test ipcam */
     //APP_CHK_RET(app_ipcam_CmdTask_Create(), "running cmd test");
 
+    int signal_descriptor = signalfd(-1, &photoSignals, SFD_CLOEXEC | SFD_NONBLOCK);
+    if (signal_descriptor < 0) {
+        APP_PROF_LOG_PRINT(LEVEL_ERROR, "Camera signal descriptor failed: %d\n", errno);
+        return app_ipcam_Exit();
+    }
+    int readiness = wifiCameraError ? -1 :
+        open("/run/bf01-preview/camera-loop.ready", O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (readiness >= 0)
+        close(readiness);
     while (1) {
-        app_ipcam_WifiCamera_Poll();
-        struct timespec waitTime = { .tv_sec = 1 };
-        int receivedSignal = sigtimedwait(&photoSignals, NULL, &waitTime);
-        int signalError = errno;
+        struct pollfd descriptors[] = {
+            { .fd = app_ipcam_WifiCamera_Descriptor(), .events = POLLIN },
+            { .fd = signal_descriptor, .events = POLLIN },
+        };
+        int ready = poll(descriptors, sizeof(descriptors) / sizeof(descriptors[0]), 1000);
+        if (ready < 0 && errno != EINTR) {
+            close(signal_descriptor);
+            return app_ipcam_Exit();
+        }
+        struct signalfd_siginfo notification;
+        int receivedSignal = read(signal_descriptor, &notification, sizeof(notification)) == sizeof(notification) ?
+            (int)notification.ssi_signo : -1;
+        if (receivedSignal == SIGINT || receivedSignal == SIGTERM) {
+            close(signal_descriptor);
+            return app_ipcam_Exit();
+        }
+        if (descriptors[0].revents & POLLIN)
+            app_ipcam_WifiCamera_Poll();
         if (receivedSignal == SIGUSR1) {
             if (live_only || app_event_live()) {
                 fprintf(stderr, "[live] photo signal ignored by live-only camera\n");
@@ -472,12 +497,6 @@ int main(int argc, char *argv[])
             int playbackResult = app_ipcam_Playback_Play(prompt);
             fprintf(stderr, "[audio] local prompt request: file=%s result=%d\n", prompt, playbackResult);
 #endif
-        } else if (receivedSignal == SIGINT || receivedSignal == SIGTERM) {
-            return app_ipcam_Exit();
-        } else if (receivedSignal < 0 && signalError != EAGAIN && signalError != EINTR) {
-            APP_PROF_LOG_PRINT(LEVEL_ERROR, "Camera control stopped; shutting down ipcamera\n");
-            app_ipcam_Exit();
-            return CVI_FAILURE;
         }
         app_ipcam_Preview_NetworkAlive();
         if (!previewStarted && previewRetry++ % 5 == 0) {

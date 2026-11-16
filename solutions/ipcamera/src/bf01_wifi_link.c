@@ -35,6 +35,12 @@ struct bf_wifi_link {
     cJSON *queue[WIFI_QUEUE];
     struct wifi_cache cache[WIFI_CACHE];
     struct wifi_parts parts;
+    cJSON *stream_pending;
+    char stream_body[BF_WIFI_RECEIVE_MAX + 1];
+    uint64_t stream_deadline;
+    uint64_t stream_poll_after;
+    int stream_result;
+    unsigned int stream_retry_id;
     unsigned int cache_next;
     unsigned int head;
     unsigned int count;
@@ -194,6 +200,13 @@ void bf_wifi_reset(struct bf_wifi_link *link)
         return;
     clear_parts(link);
     clear_outgoing(link);
+    cJSON_Delete(link->stream_pending);
+    link->stream_pending = NULL;
+    link->stream_body[0] = '\0';
+    link->stream_deadline = 0;
+    link->stream_poll_after = 0;
+    link->stream_result = 0;
+    link->stream_retry_id = 0;
     cJSON_Delete(link->settings);
     cJSON_Delete(link->http);
     cJSON_Delete(link->next_http);
@@ -415,6 +428,18 @@ static int receive_message(struct bf_wifi_link *link, uint64_t monotonic, uint64
     if (id && link->parts.id == id)
         clear_parts(link);
     link->peer_id = id;
+    int stream_conflict = 0;
+    if (link->stream_pending && id == (unsigned int)item(link->stream_pending, "id")->valueint) {
+        if (!strcmp(link->stream_body, link->peer)) {
+            cJSON_Delete(request);
+            return EINPROGRESS;
+        }
+        cJSON_Delete(link->stream_pending);
+        link->stream_pending = NULL;
+        stream_conflict = 1;
+    }
+    if (id && id == link->stream_retry_id && strcmp(link->stream_body, link->peer))
+        stream_conflict = 1;
     for (unsigned int index = 0; id && index < WIFI_CACHE; index++) {
         if (link->cache[index].id == id && !strcmp(link->cache[index].body, link->peer)) {
             strcpy(link->ack, link->cache[index].ack);
@@ -434,9 +459,10 @@ static int receive_message(struct bf_wifi_link *link, uint64_t monotonic, uint64
     int accepted = 1;
     link->ack_full = 0;
     if (id && cJSON_IsObject(request) && unique(request)) {
-        int reused = id <= link->highest_peer_id;
+        int stream_retry = id == link->stream_retry_id && !strcmp(link->stream_body, link->peer);
+        int reused = id <= link->highest_peer_id && !stream_retry;
         const cJSON *command = item(request, "cmd");
-        if (reused)
+        if (reused || stream_conflict)
             accepted = 1;
         else if (equals(command, "set")) {
             accepted = apply_set(link, request, &link->ack_full);
@@ -454,10 +480,33 @@ static int receive_message(struct bf_wifi_link *link, uint64_t monotonic, uint64
                 link->next_http = cJSON_Duplicate(request, 1);
                 accepted = link->next_http ? 0 : 2;
             }
-        } else if (equals(command, "stream"))
-            accepted = !stream_valid(request, now) ? 1 :
-                link->ops.stream ? result(link->ops.stream(link->context, request)) : 2;
-        else if (equals(command, "get")) {
+        } else if (equals(command, "stream")) {
+            if (!stream_valid(request, now))
+                accepted = 1;
+            else {
+                if (link->stream_pending)
+                    link->stream_result = 2;
+                else
+                    link->stream_body[0] = '\0';
+                link->stream_retry_id = 0;
+                int streamed = link->ops.stream ? link->ops.stream(link->context, request) : 2;
+                if (streamed == EINPROGRESS && equals(item(request, "action"), "start") &&
+                    !link->stream_pending) {
+                    link->stream_pending = cJSON_Duplicate(request, 1);
+                    if (link->stream_pending) {
+                        strcpy(link->stream_body, link->peer);
+                        link->stream_retry_id = 0;
+                        link->stream_deadline = monotonic + BF_WIFI_STREAM_ACK_WAIT_MS;
+                        link->stream_poll_after = monotonic + 100;
+                        link->stream_result = EINPROGRESS;
+                        cJSON_Delete(ack);
+                        cJSON_Delete(request);
+                        return EINPROGRESS;
+                    }
+                }
+                accepted = result(streamed);
+            }
+        } else if (equals(command, "get")) {
             const cJSON *name = item(request, "name");
             cJSON *value = NULL;
             if (equals(name, "dps")) {
@@ -485,6 +534,35 @@ static int receive_message(struct bf_wifi_link *link, uint64_t monotonic, uint64
     cJSON_Delete(ack);
     cJSON_Delete(request);
     return error;
+}
+
+static int complete_stream(struct bf_wifi_link *link, uint64_t monotonic)
+{
+    if (!link->stream_pending)
+        return EAGAIN;
+    int timed_out = link->stream_result == EINPROGRESS && monotonic >= link->stream_deadline;
+    if (timed_out)
+        link->stream_result = 2;
+    if (link->stream_result == EINPROGRESS && monotonic >= link->stream_poll_after) {
+        int streamed = link->ops.stream(link->context, link->stream_pending);
+        link->stream_poll_after = monotonic + 100;
+        if (streamed != EINPROGRESS)
+            link->stream_result = result(streamed);
+    }
+    if (link->stream_result == EINPROGRESS)
+        return EAGAIN;
+    link->peer_id = (unsigned int)item(link->stream_pending, "id")->valueint;
+    strcpy(link->peer, link->stream_body);
+    link->ack_result = link->stream_result;
+    link->ack_full = 0;
+    snprintf(link->ack, sizeof(link->ack), "{\"cmd\":\"ack\",\"id\":%u,\"result\":%d}",
+        link->peer_id, link->ack_result);
+    cJSON_Delete(link->stream_pending);
+    link->stream_pending = NULL;
+    link->stream_retry_id = timed_out ? link->peer_id : 0;
+    if (!timed_out)
+        link->stream_body[0] = '\0';
+    return 0;
 }
 
 int bf_wifi_enqueue(struct bf_wifi_link *link, const cJSON *request)
@@ -543,6 +621,10 @@ static int send_ack(struct bf_wifi_link *link)
     if (error || *response)
         return error ? error : EPROTO;
     if (link->ack_result != 2) {
+        if (link->peer_id == link->stream_retry_id) {
+            link->stream_retry_id = 0;
+            link->stream_body[0] = '\0';
+        }
         struct wifi_cache *cached = &link->cache[link->cache_next++ % WIFI_CACHE];
         cached->id = link->peer_id;
         strcpy(cached->body, link->peer);
@@ -692,6 +774,8 @@ int bf_wifi_step(struct bf_wifi_link *link, uint64_t monotonic, uint64_t realtim
     if (!link)
         return EINVAL;
     if (*link->ack)
+        return send_ack(link);
+    if (!complete_stream(link, monotonic))
         return send_ack(link);
     if (link->parts.count && monotonic - link->parts.started >= BF_WIFI_PART_TIMEOUT_MS) {
         fprintf(stderr, "[wifi-link] part timeout id=%u received=%u/%u bytes=%zu\n",

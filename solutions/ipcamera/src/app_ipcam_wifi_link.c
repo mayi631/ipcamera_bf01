@@ -276,6 +276,7 @@ static int wifi_apply(void *context, const cJSON *changes, int full)
     int blocked = 0;
     const cJSON *field;
     cJSON_ArrayForEach(field, changes) {
+
         int error = 0;
         if (!strcmp(field->string, "image_anti_flicker")) {
             cJSON *request = cJSON_CreateObject();
@@ -463,6 +464,31 @@ static int wifi_snapshot(void *context, const char *name, cJSON **value)
 
 static int live_camera_start(struct wifi_service *service)
 {
+    FILE *camera_pid = fopen("/run/bf01-preview/ipcamera.pid", "r");
+    long owner = 0;
+    if (camera_pid) {
+        int valid = fscanf(camera_pid, "%ld", &owner) == 1 && owner > 1 && owner <= INT_MAX;
+        fclose(camera_pid);
+        if (valid && !kill((pid_t)owner, 0)) {
+            char path[64], target[PATH_MAX], executable[PATH_MAX];
+            snprintf(path, sizeof(path), "/proc/%ld/exe", owner);
+            ssize_t target_length = readlink(path, target, sizeof(target) - 1);
+            ssize_t executable_length = readlink("/proc/self/exe", executable, sizeof(executable) - 1);
+            if (target_length > 0 && target_length == executable_length &&
+                !memcmp(target, executable, (size_t)target_length))
+                return EINPROGRESS;
+        }
+    }
+    int owner_lock = open("/run/bf01-preview/ipcm.lock", O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+    if (owner_lock >= 0) {
+        int locked = flock(owner_lock, LOCK_EX | LOCK_NB);
+        int lock_error = errno;
+        close(owner_lock);
+        if (locked && (lock_error == EWOULDBLOCK || lock_error == EAGAIN))
+            return EINPROGRESS;
+        if (locked)
+            return lock_error;
+    }
     if (service->live_camera > 0) {
         pid_t finished = waitpid(service->live_camera, NULL, WNOHANG);
         if (!finished)
@@ -523,7 +549,7 @@ static int live_apply(struct wifi_service *service, const cJSON *request)
     if (!command)
         return ENOMEM;
     cJSON_AddStringToObject(command, "operation", "stream");
-    int error = app_ipcam_WifiCamera_Request(command, &reply);
+    int error = app_ipcam_WifiCamera_RequestTimed(command, &reply, 100);
     cJSON_Delete(command);
     cJSON_Delete(reply);
     if ((error == ENOENT || error == ECONNREFUSED) && cJSON_IsString(action) && !strcmp(action->valuestring, "start"))
@@ -543,7 +569,9 @@ static int wifi_stream(void *context, const cJSON *request)
         return 2;
     int error = live_apply(service, request);
     int busy = error == EINPROGRESS || error == EBUSY || error == ENOENT || error == ECONNREFUSED || error == ETIMEDOUT;
+    int deferred = busy && cJSON_IsString(action) && !strcmp(action->valuestring, "start");
     if (busy) {
+        service->live_poll_after = wifi_clock(CLOCK_MONOTONIC) + 100;
         cJSON *copy = cJSON_Duplicate(request, 1);
         if (copy) {
             cJSON_Delete(service->live_pending);
@@ -553,16 +581,18 @@ static int wifi_stream(void *context, const cJSON *request)
         cJSON_Delete(service->live_pending);
         service->live_pending = NULL;
     }
-    fprintf(stderr, "[wifi-link] live action=%s errno=%d ack=%d\n",
-        cJSON_IsString(action) ? action->valuestring : "", error, !error ? 0 : busy ? 2 : 1);
-    return !error ? 0 : busy ? 2 : 1;
+    fprintf(stderr, "[wifi-link] live action=%s errno=%d ack=%s\n",
+        cJSON_IsString(action) ? action->valuestring : "", error,
+        deferred ? "pending" : !error ? "0" : busy ? "2" : "1");
+    return deferred ? EINPROGRESS : !error ? 0 : busy ? 2 : 1;
 }
 
 static void live_poll(struct wifi_service *service, uint64_t now)
 {
     if (now < service->live_poll_after)
         return;
-    service->live_poll_after = now + 2000;
+    unsigned int interval = service->live_pending ? 100 : app_event_live() ? 500 : 2000;
+    service->live_poll_after = now + interval;
     if (service->live_pending) {
         int error = live_apply(service, service->live_pending);
         if (!error || (error != EINPROGRESS && error != EBUSY && error != ENOENT &&
@@ -576,7 +606,7 @@ static void live_poll(struct wifi_service *service, uint64_t now)
     if (!query)
         return;
     cJSON_AddStringToObject(query, "operation", "stream-status");
-    int error = app_ipcam_WifiCamera_Request(query, &reply);
+    int error = app_ipcam_WifiCamera_RequestTimed(query, &reply, 100);
     cJSON_Delete(query);
     const cJSON *stream = cJSON_GetObjectItemCaseSensitive(reply, "stream");
     service->live_error = error;

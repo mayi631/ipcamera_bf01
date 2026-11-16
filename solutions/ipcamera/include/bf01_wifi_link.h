@@ -9,6 +9,7 @@
 #define BF_WIFI_SEND_MAX 1595U
 #define BF_WIFI_PARTS_MAX 32U
 #define BF_WIFI_PART_TIMEOUT_MS 15000U
+#define BF_WIFI_STREAM_ACK_WAIT_MS 2500U
 
 struct bf_wifi_link;
 

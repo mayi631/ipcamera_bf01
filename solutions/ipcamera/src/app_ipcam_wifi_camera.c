@@ -92,6 +92,7 @@ void app_ipcam_WifiCamera_Stop(void)
 {
     app_ipcam_Stream_Stop();
     if (camera_listener >= 0) {
+        unlink("/run/bf01-preview/camera-loop.ready");
         close(camera_listener);
         camera_listener = -1;
         unlink(CAMERA_SOCKET);
@@ -116,6 +117,7 @@ int app_ipcam_WifiCamera_Start(void)
         app_ipcam_WifiCamera_Stop();
         return error;
     }
+    unlink("/run/bf01-preview/camera-loop.ready");
     int descriptor = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
     struct sockaddr_un address = { .sun_family = AF_UNIX, .sun_path = CAMERA_SOCKET };
     int error = descriptor < 0 ? errno : 0;
@@ -136,6 +138,11 @@ int app_ipcam_WifiCamera_Start(void)
     camera_listener = descriptor;
     fprintf(stderr, "[wifi-camera] production control ready pid=%ld\n", (long)getpid());
     return 0;
+}
+
+int app_ipcam_WifiCamera_Descriptor(void)
+{
+    return camera_listener;
 }
 
 void app_ipcam_WifiCamera_Poll(void)
@@ -190,6 +197,11 @@ void app_ipcam_WifiCamera_Poll(void)
 
 int app_ipcam_WifiCamera_Request(const cJSON *request, cJSON **reply)
 {
+    return app_ipcam_WifiCamera_RequestTimed(request, reply, 1500);
+}
+
+int app_ipcam_WifiCamera_RequestTimed(const cJSON *request, cJSON **reply, int timeout_ms)
+{
     *reply = NULL;
     char *encoded = cJSON_PrintUnformatted(request);
     if (!encoded)
@@ -207,7 +219,7 @@ int app_ipcam_WifiCamera_Request(const cJSON *request, cJSON **reply)
     struct pollfd pending = { .fd = descriptor, .events = POLLIN };
     char buffer[4096];
     if (!error) {
-        int ready = poll(&pending, 1, 1500);
+        int ready = poll(&pending, 1, timeout_ms);
         if (ready <= 0)
             error = ready ? errno : ETIMEDOUT;
         else {

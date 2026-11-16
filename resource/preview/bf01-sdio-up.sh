@@ -26,53 +26,74 @@ check_shutdown()
     }
 }
 
+clock_cs()
+{
+    read -r CLOCK_UPTIME CLOCK_REST < /proc/uptime
+    CLOCK_SECONDS=${CLOCK_UPTIME%.*}
+    CLOCK_FRACTION=${CLOCK_UPTIME#*.}
+    NOW_CS=$((CLOCK_SECONDS * 100 + 1$CLOCK_FRACTION - 100))
+}
+
 check_shutdown
+
+if [ "$ACTION" != status ]; then
+    if [ ! -d /sys/module/cfg80211 ]; then
+        check_shutdown
+        insmod "$BASE/cfg80211.ko"
+    fi
+    if [ ! -d /sys/module/atbm6461_wifi_sdio ]; then
+        check_shutdown
+        log_stage 'Registering SDIO driver before enumeration wait'
+        insmod "$BASE/atbm6461_wifi_sdio.ko"
+    fi
+fi
 
 find_sdio()
 {
     for CARD in /sys/bus/sdio/devices/mmc1:*:1; do
         [ -r "$CARD/vendor" ] || continue
-        [ "$(cat "$CARD/vendor")" = 0x007a ] || continue
-        [ "$(cat "$CARD/device")" = 0x6011 ] || continue
+        read -r CARD_VENDOR < "$CARD/vendor" || continue
+        [ "$CARD_VENDOR" = 0x007a ] || continue
+        read -r CARD_DEVICE < "$CARD/device" || continue
+        [ "$CARD_DEVICE" = 0x6011 ] || continue
         return 0
     done
     return 1
 }
 
-COUNT=0
+clock_cs
+DEADLINE_CS=$((NOW_CS + 6000))
+NEXT_RESCAN_CS=$NOW_CS
 until find_sdio; do
     check_shutdown
     [ "$ACTION" != status ] || exit 1
-    [ ! -d /sys/module/atbm6461_wifi_sdio ] || {
-        log_stage 'Driver loaded without matching SDIO function; leaving driver untouched'
-        exit 1
-    }
-    [ "$COUNT" -lt 60 ] || { log_stage 'Timed out waiting for SDIO function 007a:6011'; exit 1; }
-    [ "$COUNT" -ne 0 ] || log_stage 'Waiting for SDIO function 007a:6011; no fixed startup delay'
-    if [ -w /sys/class/mmc_host/mmc1/rescan ] && [ "$((COUNT % 2))" -eq 0 ]; then
-        echo 1 > /sys/class/mmc_host/mmc1/rescan
+    clock_cs
+    [ "$NOW_CS" -lt "$DEADLINE_CS" ] || { log_stage 'Timed out waiting for SDIO function 007a:6011; registered driver left in place'; exit 1; }
+    if [ "$NOW_CS" -ge "$NEXT_RESCAN_CS" ]; then
+        if [ -w /sys/class/mmc_host/mmc1/rescan ]; then
+            echo 1 > /sys/class/mmc_host/mmc1/rescan
+        fi
+        NEXT_RESCAN_CS=$((NOW_CS + 200))
     fi
-    sleep 1
-    COUNT=$((COUNT + 1))
+    sleep 0.1
 done
 log_stage 'SDIO function 007a:6011 enumerated'
-if [ ! -d /sys/module/cfg80211 ]; then
+until [ -d "$CARD/driver" ] &&
+      { [ -r "$CARD/bf01_startup_state" ] ||
+        { [ -c /dev/atbm_ioctl ] && [ -d /sys/class/net/wlan0 ]; }; }; do
     check_shutdown
     [ "$ACTION" != status ] || exit 1
-    insmod "$BASE/cfg80211.ko"
-fi
-if [ ! -d /sys/module/atbm6461_wifi_sdio ]; then
-    check_shutdown
-    [ "$ACTION" != status ] || exit 1
-    log_stage 'Loading SDIO driver'
-    insmod "$BASE/atbm6461_wifi_sdio.ko"
-fi
-[ -d "$CARD/driver" ] || {
-    log_stage "SDIO probe failed or has not bound: $CARD; module loaded is not driver ready, inspect dmesg WSM startup; no automatic rebind/reload"
-    exit 1
-}
-COUNT=0
+    clock_cs
+    [ "$NOW_CS" -lt "$DEADLINE_CS" ] || {
+        log_stage "SDIO probe has not completed: $CARD; module loaded is not driver ready; no automatic rebind/reload"
+        exit 1
+    }
+    sleep 0.1
+done
+HANDSHAKE_VERIFIED=0
 if [ -r "$CARD/bf01_startup_state" ]; then
+    clock_cs
+    DEADLINE_CS=$((NOW_CS + 6000))
     while :; do
         check_shutdown
         read -r DRIVER_STATE DRIVER_DETAILS < "$CARD/bf01_startup_state" || {
@@ -80,13 +101,16 @@ if [ -r "$CARD/bf01_startup_state" ]; then
             exit 1
         }
         case "$DRIVER_STATE" in
-            ready) log_stage "Real WSM handshake ready: $DRIVER_DETAILS"; break ;;
+            ready)
+                HANDSHAKE_VERIFIED=1
+                log_stage "Real WSM handshake ready: $DRIVER_DETAILS"
+                break
+                ;;
             retry|handshaking)
-                [ "$COUNT" -ne 0 ] || log_stage "Driver loaded; background handshake $DRIVER_STATE: $DRIVER_DETAILS"
                 [ "$ACTION" != status ] || exit 1
-                [ "$COUNT" -lt 60 ] || { log_stage 'Driver still retrying handshake; leaving worker active for next startup check'; exit 1; }
-                sleep 1
-                COUNT=$((COUNT + 1))
+                clock_cs
+                [ "$NOW_CS" -lt "$DEADLINE_CS" ] || { log_stage 'Driver still retrying handshake; leaving worker active for next startup check'; exit 1; }
+                sleep 0.1
                 ;;
             *) log_stage "Driver handshake unavailable: $DRIVER_STATE $DRIVER_DETAILS"; exit 1 ;;
         esac
@@ -97,8 +121,12 @@ fi
     exit 1
 }
 check_shutdown
-timeout 8 "$BASE/atbm_wifi_ctl" status
-log_stage 'Driver control interface ready'
+if [ "$ACTION" = network-start ] && [ "$HANDSHAKE_VERIFIED" -eq 1 ]; then
+    log_stage 'Driver backend verified by real WSM readiness; network watcher will query module status'
+else
+    timeout 8 "$BASE/atbm_wifi_ctl" status
+    log_stage 'Driver control interface ready'
+fi
 case "$ACTION" in network|network-start) ;; *) exit 0 ;; esac
 if pidof atbm_iot_supplicant >/dev/null 2>&1; then
     echo 'Refusing to change a connection owned by another supplicant' >&2
@@ -142,14 +170,16 @@ else
     printf '%s\n' "$WATCH_PID" > "$RUN/watch.pid"
 fi
 [ "$ACTION" != network-start ] || {
-    COUNT=0
+    clock_cs
+    DEADLINE_CS=$((NOW_CS + 500))
     while [ ! -f "$RUN/watcher.ready" ]; do
         check_shutdown
         kill -0 "$WATCH_PID" 2>/dev/null || { log_stage 'Network watcher exited before becoming ready'; exit 1; }
-        [ "$COUNT" -lt 5 ] || { log_stage 'Network watcher did not become ready'; exit 1; }
-        sleep 1
-        COUNT=$((COUNT + 1))
+        clock_cs
+        [ "$NOW_CS" -lt "$DEADLINE_CS" ] || { log_stage 'Network watcher did not become ready'; exit 1; }
+        sleep 0.1
     done
+    kill -0 "$WATCH_PID" 2>/dev/null || { log_stage 'Network watcher exited after readiness'; exit 1; }
     log_stage "Network watcher active: $WATCH_PID; IP synchronization continues in background"
     exit 0
 }

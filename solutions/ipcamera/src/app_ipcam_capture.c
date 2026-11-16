@@ -72,7 +72,7 @@ static uint64_t monotonic_ms(void)
 
 static int capture_discarding(void)
 {
-    int live = app_event_live();
+    int live = app_event_boot_cancelled();
     pthread_mutex_lock(&capture_mutex);
     if (live)
         capture_discard_requested = 1;
