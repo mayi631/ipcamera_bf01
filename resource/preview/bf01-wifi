@@ -26,8 +26,17 @@ log_stage()
     echo "[wifi-startup uptime=${STAGE_UPTIME}s] $*"
 }
 
+check_shutdown()
+{
+    [ ! -e /run/bf01-poweroff/requested ] || {
+        log_stage 'Poweroff requested; Wi-Fi startup cancelled'
+        exit 1
+    }
+}
+
 start_clock()
 {
+    check_shutdown
     if [ "$(date +%s)" -lt 1577836800 ]; then
         nohup flock -n "$RUN/clock.lock" "$BASE/bf01-wifi" _clock wait-network \
             </dev/null >>"$RUN/clock.log" 2>&1 8>&- &
@@ -36,6 +45,7 @@ start_clock()
 
 case "${1:-status}" in
     start)
+        check_shutdown
         mkdir -p "$RUN"
         chmod 700 "$RUN"
         exec 8>"$RUN/start.lock"
@@ -60,12 +70,14 @@ case "${1:-status}" in
             fi
         fi
         log_stage 'Starting SDIO readiness check'
+        check_shutdown
         "$BASE/wifi/bf01-sdio-up.sh" network-start 8>&- >>"$RUN/network.log" 2>&1 || {
             log_stage "SDIO or network watcher not ready; startup will retry, inspect $RUN/network.log"
             exit 1
         }
         start_clock
         log_stage 'Starting protocol service without waiting for IP or clock'
+        check_shutdown
         nohup "$BASE/ipcamera" --wifi-service </dev/null >>"$RUN/service.log" 2>&1 8>&- &
         CHILD=$!
         COUNT=0
@@ -104,6 +116,7 @@ case "${1:-status}" in
         exec flock -n "$RUN/clock.lock" "$BASE/bf01-wifi" _clock
         ;;
     _clock)
+        check_shutdown
         [ "$(id -u)" = 0 ] || exit 1
         if [ "$(date +%s)" -ge 1577836800 ]; then
             echo '[wifi-clock] UTC already valid; no adjustment'
@@ -113,6 +126,7 @@ case "${1:-status}" in
             log_stage 'Clock worker waiting for network address, route and DNS'
             COUNT=0
             while [ ! -f /run/atbm_wifi/watcher.ready ] || [ ! -f /run/atbm_wifi/network.ready ]; do
+                check_shutdown
                 [ "$(date +%s)" -lt 1577836800 ] || exit 0
                 [ "$COUNT" -lt 30 ] || { log_stage 'Network not ready for clock sync; supervisor will retry'; exit 1; }
                 sleep 1
@@ -120,6 +134,7 @@ case "${1:-status}" in
             done
         fi
         log_stage 'Starting fast TCP clock synchronization'
+        check_shutdown
         if timeout 8 "$BASE/ipcamera" --wifi-sync-time; then
             if [ "$(date +%s)" -ge 1577836800 ]; then
                 log_stage 'UTC ready from TCP time source'

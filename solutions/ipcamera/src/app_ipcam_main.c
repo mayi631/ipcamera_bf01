@@ -18,6 +18,7 @@
 #include "app_ipcam_wifi_link.h"
 #include "app_ipcam_wifi_camera.h"
 #include "app_ipcam_event.h"
+#include "app_ipcam_power_guard.h"
 
 /**************************************************************************
  *                              M A C R O S                               *
@@ -115,6 +116,7 @@ static int app_ipcam_MiscThread_DeInit(void)
 
 static int app_ipcam_Exit(void)
 {
+    app_ipcam_PowerGuard_Stop();
     app_ipcam_WifiCamera_Stop();
     app_ipcam_Playback_Stop();
     if (!live_only)
@@ -324,6 +326,8 @@ int main(int argc, char *argv[])
     sigaddset(&photoSignals, SIGINT);
     sigaddset(&photoSignals, SIGTERM);
     APP_CHK_RET(pthread_sigmask(SIG_BLOCK, &photoSignals, NULL), "block photo signal");
+
+    APP_CHK_RET(app_ipcam_PowerGuard_Start(), "start GPIO power guard");
 
 #ifdef BF01_BOOT_CAPTURE
     int boot_ai_enabled = 1;

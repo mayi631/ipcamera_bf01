@@ -31,6 +31,9 @@ require_driver_feature main.c 'startup_deadline = startup_started + msecs_to_jif
 require_driver_feature apollo_sdio.c 'retry_in_ms=1000; driver remains bound' '1000 ms handshake retry policy'
 require_driver_feature apollo_sdio.c 'static void atbm_bf01_startup_abort(' 'startup transport failure latch'
 require_driver_feature main.c 'stop startup I/O before retry cleanup' 'startup I/O quiescence before retry cleanup'
+require_driver_feature apollo_sdio.c 'BF01 SDIO removal: transport stopped before IRQ/thread cleanup' 'transport cancellation during removal'
+require_driver_feature apollo_sdio.c 'BF01 shutdown: removing host driver without waiting for firmware commands' 'shutdown independent of firmware replies'
+require_driver_feature apollo_sdio.c 'BF01 shutdown: transport quiesced before consumers stop' 'early transport shutdown before consumer teardown'
 make -C "$KERNEL" M="$PRIVATE_SOURCE" ARCH=arm CROSS_COMPILE="$CROSS" modules
 install -m 644 "$PRIVATE_SOURCE/hal_apollo/atbm6461_wifi_sdio.ko" "$OUTPUT/"
 printf 'Candidate only; no device deployment or SDIO startup changes: %s\n' "$OUTPUT/atbm6461_wifi_sdio.ko"

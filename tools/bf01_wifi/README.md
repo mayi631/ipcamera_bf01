@@ -53,6 +53,14 @@
 
 ## 构建
 
+### GPIO 低电平关机
+
+GPIOA29 拉低后，应用调用随固件安装的 `bf01-poweroff`：先设置本次启动的关机标志，禁止相机/Wi-Fi 自动重启、SDIO 重新加载和校时启动；向 SDIO 的 `bf01_startup_state` 写入 `stop`，先拒绝新的传输、取消握手并唤醒未完成的 WSM 命令，再等待 SDIO 启动控制锁释放，停止持有 `/dev/atbm_ioctl` 的消费者，正常卸载 `atbm6461_wifi_sdio`，最后执行 `/sbin/poweroff`。停止传输不向模组发送命令；该状态在本次加载中不可恢复。旧驱动没有此入口时仍尝试原卸载流程，不能视为本修复已生效。不强制卸载，不卸载可能被其他设备共用的 `cfg80211`。`/run` 关机标志仅重启后消失，不修改 AI、直播或云端参数。
+
+消费者先等待 5 秒，再 SIGKILL 并等待 2 秒；卸载最多观察 10 秒。卸载失败或内核阻塞会明确记录，不把超时或 `poweroff` 返回成功视为物理关机成功，也不使用 `poweroff -f` 绕过文件系统清理。配套 0042 驱动修复让取消状态优先于握手成功状态，并在 IRQ/线程清理前停止收发；BF01 关机 notifier 不再发 WSM 关机/休眠命令等待已失联的模组，模块卸载则先注销 notifier。必须结合真实串口验证卸载和最终 `Power down`，编译或模拟测试不能替代整机验收。
+
+关机步骤日志保存在 `/mnt/data/diagnostics/poweroff/latest.log`，上次记录为 `previous.log`；DATA 不可写时退回 `/run/bf01-poweroff/shutdown.log`。这不是完整启动/内核末段日志：只读重挂载后的关机串口需要电脑侧持续采集。脚本和应用必须一起安装，之后重新打包 DATA 才会进入客户固件。
+
 ```sh
 make -C tools/bf01_wifi
 make -C tools/bf01_wifi OUTPUT=/tmp/bf01-wifi-arm CC=/path/to/arm-linux-gnueabihf-gcc AR=/path/to/arm-linux-gnueabihf-ar

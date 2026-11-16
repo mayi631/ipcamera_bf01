@@ -37,7 +37,7 @@ ROOTFS=$(CDPATH= cd -- "$ROOTFS" && pwd)
     echo 'Refusing to replace an existing /usr/bin/bf01-preview file' >&2
     exit 1
 }
-for FILE in ipcamera param_config.ini bf01_atbm_ap bf01-preview bf01-wifi wifi/bf01-sdio-up.sh wifi/atbm_wifi_ctl wifi/atbm6461_wifi_sdio.ko wifi/cfg80211.ko ap.conf capture.ini boot_ai.ini cloud.ini cloud-ca.pem yolov5s_cv181x_bf16.cvimodel lib/libcviruntime.so lib/libcvikernel.so lib/libssl.so.1.1 lib/libcrypto.so.1.1; do
+for FILE in ipcamera param_config.ini bf01_atbm_ap bf01-preview bf01-wifi bf01-poweroff wifi/bf01-sdio-up.sh wifi/atbm_wifi_ctl wifi/atbm6461_wifi_sdio.ko wifi/cfg80211.ko ap.conf capture.ini boot_ai.ini cloud.ini cloud-ca.pem yolov5s_cv181x_bf16.cvimodel lib/libcviruntime.so lib/libcvikernel.so lib/libssl.so.1.1 lib/libcrypto.so.1.1; do
     [ -f "$SOURCE/$FILE" ] || { echo "Missing $SOURCE/$FILE; build and install IPC first" >&2; exit 1; }
 done
 if [ -n "$AP_CONFIG" ]; then
@@ -50,6 +50,7 @@ fi
 DEST="$ROOTFS/mnt/system/bf01-preview"
 install -d -m 755 "$DEST" "$ROOTFS/usr/bin"
 install -m 755 "$SOURCE/ipcamera" "$SOURCE/bf01_atbm_ap" "$SOURCE/bf01-preview" "$DEST/"
+install -m 755 "$SOURCE/bf01-poweroff" "$DEST/"
 install -m 644 "$SOURCE/param_config.ini" "$DEST/param_config.ini"
 install -m 600 "$SOURCE/capture.ini" "$DEST/capture.ini"
 install -m 600 "$SOURCE/boot_ai.ini" "$DEST/boot_ai.ini"

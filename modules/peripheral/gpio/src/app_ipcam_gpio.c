@@ -173,6 +173,7 @@ static int GpioValueGet(unsigned int gpio, unsigned int *value)
     int fd;
     char buf[MAX_BUF];
     char ch;
+    ssize_t read_count;
 
     snprintf(buf, sizeof(buf), SYSFS_GPIO_DIR "/gpio%d/value", gpio);
 
@@ -188,15 +189,22 @@ static int GpioValueGet(unsigned int gpio, unsigned int *value)
         return fd;
     }
 
-    if (-1 == read(fd, &ch, 1)) {
+    read_count = read(fd, &ch, 1);
+    if (read_count != 1) {
         APP_PROF_LOG_PRINT(LEVEL_DEBUG,"read gpio value failed\n");
+        close(fd);
+        return -1;
     }
     //APP_PROF_LOG_PRINT(LEVEL_DEBUG," GpioValueGet = %c \n", ch);
 
-    if (ch != '0') {
+    if (ch == '1') {
         *value = 1;
-    } else {
+    } else if (ch == '0') {
         *value = 0;
+    } else {
+        APP_PROF_LOG_PRINT(LEVEL_DEBUG,"get gpio value failed\n");
+        close(fd);
+        return -1;
     }
 
     close(fd);

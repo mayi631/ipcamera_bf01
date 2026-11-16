@@ -30,6 +30,7 @@ ifeq ($(CONFIG_RESOURCE_INSTALL_FBM_CV1815JA_BF01_GC4683),y)
 	@bash "$(SRCTREE)/tools/bf01_wifi/build-driver.sh" "$(TOP_DIR)" "$(TARGET_OUT_DIR)/bf01-wifi-driver" "$(CROSS_COMPILE)"
 	@mkdir -p $(APP_INSTALL_DIR)/wifi
 	@install -m 755 $(APP_RESOURCE_DIR)/preview/bf01-wifi $(APP_INSTALL_DIR)/bf01-wifi
+	@install -m 755 $(APP_RESOURCE_DIR)/preview/bf01-poweroff $(APP_INSTALL_DIR)/bf01-poweroff
 	@install -m 755 $(APP_RESOURCE_DIR)/preview/bf01-sdio-up.sh $(APP_INSTALL_DIR)/wifi/bf01-sdio-up.sh
 	@install -m 755 $(TOP_DIR)/install/soc_cv1815ja_bf01_spinand/data/wifi/atbm_wifi_ctl $(APP_INSTALL_DIR)/wifi/
 	@install -m 644 $(TARGET_OUT_DIR)/bf01-wifi-driver/atbm6461_wifi_sdio.ko $(APP_INSTALL_DIR)/wifi/
@@ -38,6 +39,7 @@ ifeq ($(CONFIG_RESOURCE_INSTALL_FBM_CV1815JA_BF01_GC4683),y)
 	@install -m 644 $(TARGET_OUT_DIR)/bf01-wifi-driver/atbm6461_wifi_sdio.ko "$(OUTPUT_DIR)/data/wifi/"
 	@install -m 755 $(TARGET) "$(OUTPUT_DIR)/data/ipcamera"
 	@install -m 755 $(APP_RESOURCE_DIR)/preview/bf01-wifi "$(OUTPUT_DIR)/data/bf01-wifi"
+	@install -m 755 $(APP_RESOURCE_DIR)/preview/bf01-poweroff "$(OUTPUT_DIR)/data/bf01-poweroff"
 	@install -m 755 $(APP_RESOURCE_DIR)/preview/bf01-sdio-up.sh "$(OUTPUT_DIR)/data/wifi/bf01-sdio-up.sh"
 	@install -m 755 $(APP_RESOURCE_DIR)/preview/auto.sh.example "$(OUTPUT_DIR)/data/auto.sh"
 	@install -m 600 $(APP_RESOURCE_DIR)/preview/boot_ai.ini $(APP_INSTALL_DIR)/boot_ai.ini

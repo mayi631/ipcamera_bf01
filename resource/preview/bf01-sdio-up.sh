@@ -18,6 +18,16 @@ log_stage()
     echo "[wifi-sdio uptime=${STAGE_UPTIME}s] $*"
 }
 
+check_shutdown()
+{
+    [ ! -e /run/bf01-poweroff/requested ] || {
+        log_stage 'Poweroff requested; SDIO startup cancelled'
+        exit 1
+    }
+}
+
+check_shutdown
+
 find_sdio()
 {
     for CARD in /sys/bus/sdio/devices/mmc1:*:1; do
@@ -31,6 +41,7 @@ find_sdio()
 
 COUNT=0
 until find_sdio; do
+    check_shutdown
     [ "$ACTION" != status ] || exit 1
     [ ! -d /sys/module/atbm6461_wifi_sdio ] || {
         log_stage 'Driver loaded without matching SDIO function; leaving driver untouched'
@@ -46,10 +57,12 @@ until find_sdio; do
 done
 log_stage 'SDIO function 007a:6011 enumerated'
 if [ ! -d /sys/module/cfg80211 ]; then
+    check_shutdown
     [ "$ACTION" != status ] || exit 1
     insmod "$BASE/cfg80211.ko"
 fi
 if [ ! -d /sys/module/atbm6461_wifi_sdio ]; then
+    check_shutdown
     [ "$ACTION" != status ] || exit 1
     log_stage 'Loading SDIO driver'
     insmod "$BASE/atbm6461_wifi_sdio.ko"
@@ -61,6 +74,7 @@ fi
 COUNT=0
 if [ -r "$CARD/bf01_startup_state" ]; then
     while :; do
+        check_shutdown
         read -r DRIVER_STATE DRIVER_DETAILS < "$CARD/bf01_startup_state" || {
             log_stage 'Cannot read driver handshake state'
             exit 1
@@ -82,6 +96,7 @@ fi
     log_stage 'Driver interface not ready; no automatic driver reload'
     exit 1
 }
+check_shutdown
 timeout 8 "$BASE/atbm_wifi_ctl" status
 log_stage 'Driver control interface ready'
 case "$ACTION" in network|network-start) ;; *) exit 0 ;; esac
@@ -121,6 +136,7 @@ else
         mount -o bind /run/resolv.conf /etc/resolv.conf
     fi
     rm -f "$RUN/watcher.ready" "$RUN/network.ready"
+    check_shutdown
     nohup "$BASE/atbm_wifi_ctl" watch </dev/null >"$RUN/wifi.log" 2>&1 9>&- &
     WATCH_PID=$!
     printf '%s\n' "$WATCH_PID" > "$RUN/watch.pid"
@@ -128,6 +144,7 @@ fi
 [ "$ACTION" != network-start ] || {
     COUNT=0
     while [ ! -f "$RUN/watcher.ready" ]; do
+        check_shutdown
         kill -0 "$WATCH_PID" 2>/dev/null || { log_stage 'Network watcher exited before becoming ready'; exit 1; }
         [ "$COUNT" -lt 5 ] || { log_stage 'Network watcher did not become ready'; exit 1; }
         sleep 1
@@ -138,6 +155,7 @@ fi
 }
 COUNT=0
 while [ ! -f "$RUN/watcher.ready" ] || [ ! -f "$RUN/network.ready" ]; do
+    check_shutdown
     kill -0 "$WATCH_PID" 2>/dev/null || exit 1
     [ "$COUNT" -lt 15 ] || { echo 'Module has no IP yet; watcher remains active' >&2; exit 1; }
     sleep 1

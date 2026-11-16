@@ -206,6 +206,11 @@ mkdir -p "$RUN" || exit 1
 chmod 700 "$RUN" || exit 1
 ACTION=$1
 shift
+case "$ACTION" in
+    start|boot|_network)
+        [ ! -e /run/bf01-poweroff/requested ] || fail 'poweroff already requested'
+        ;;
+esac
 if [ "$ACTION" = _network ]; then
     [ "$#" -eq 2 ] || fail 'internal argument error'
     run_network "$1" "$2"

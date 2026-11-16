@@ -1,0 +1,128 @@
+#!/bin/sh
+
+umask 077
+[ "$(id -u)" = 0 ] || exit 1
+RUN=/run/bf01-poweroff
+MODULE=atbm6461_wifi_sdio
+mkdir -p "$RUN" /run/bf01-preview /run/atbm_wifi /run/ipcamera-wifi || exit 1
+exec 7>"$RUN/lock"
+flock -n 7 || exit 0
+touch "$RUN/requested" /run/bf01-preview/supervisor.stop || exit 1
+LOG=$RUN/shutdown.log
+ARCHIVE=/mnt/data/diagnostics/poweroff
+if mkdir -p "$ARCHIVE" && [ -w "$ARCHIVE" ]; then
+    [ ! -f "$ARCHIVE/latest.log" ] || mv -f "$ARCHIVE/latest.log" "$ARCHIVE/previous.log"
+    LOG=$ARCHIVE/latest.log
+fi
+exec >>"$LOG" 2>&1
+
+log_stage()
+{
+    read -r UPTIME REST < /proc/uptime
+    MESSAGE="[poweroff uptime=${UPTIME}s] $*"
+    printf '%s\n' "$MESSAGE"
+    printf '%s\n' "$MESSAGE" > /dev/console 2>/dev/null || true
+}
+
+consumers()
+{
+    for PROCESS in /proc/[0-9]*; do
+        OWNER=${PROCESS##*/}
+        [ "$OWNER" -gt 1 ] && [ "$OWNER" != "$$" ] || continue
+        for DESCRIPTOR in "$PROCESS"/fd/*; do
+            [ "$DESCRIPTOR" -ef /dev/atbm_ioctl ] || continue
+            printf '%s\n' "$OWNER"
+            break
+        done
+    done
+}
+
+log_stage "shutdown requested; boot_id=$(cat /proc/sys/kernel/random/boot_id)"
+log_stage 'automatic camera/Wi-Fi restart disabled until next boot'
+for STATE in /sys/bus/sdio/devices/mmc1:*:1/bf01_startup_state; do
+    [ -w "$STATE" ] || continue
+    log_stage "quiescing SDIO before stopping consumers: $STATE"
+    if printf 'stop\n' > "$STATE"; then
+        log_stage 'SDIO quiesced; new transport requests rejected'
+    else
+        log_stage 'WARNING: SDIO quiesce failed; unload still required'
+    fi
+done
+log_stage 'waiting for Wi-Fi startup locks'
+COUNT=0
+exec 8>/run/ipcamera-wifi/start.lock
+while ! flock -n 8; do
+    [ "$COUNT" -lt 5 ] || break
+    sleep 1
+    COUNT=$((COUNT + 1))
+done
+START_IDLE=0
+flock -n 8 && START_IDLE=1
+COUNT=0
+exec 9>/run/atbm_wifi/control.lock
+while ! flock -n 9; do
+    [ "$COUNT" -lt 5 ] || break
+    sleep 1
+    COUNT=$((COUNT + 1))
+done
+CONTROL_IDLE=0
+flock -n 9 && CONTROL_IDLE=1
+if [ "$CONTROL_IDLE" -eq 0 ] || [ "$START_IDLE" -eq 0 ]; then
+    log_stage 'SDIO startup controller still busy; not racing module removal'
+else
+    log_stage 'Wi-Fi startup locks acquired; inspecting SDIO consumers'
+    OWNERS=$(consumers)
+    for OWNER in $OWNERS; do
+        log_stage "stopping SDIO consumer pid=$OWNER"
+        kill -TERM "$OWNER" 2>/dev/null || true
+    done
+    COUNT=0
+    while [ -n "$(consumers)" ] && [ "$COUNT" -lt 5 ]; do
+        sleep 1
+        COUNT=$((COUNT + 1))
+    done
+    for OWNER in $(consumers); do
+        log_stage "SDIO consumer still holds device; sending SIGKILL pid=$OWNER"
+        kill -KILL "$OWNER" 2>/dev/null || true
+    done
+    COUNT=0
+    while [ -n "$(consumers)" ] && [ "$COUNT" -lt 2 ]; do
+        sleep 1
+        COUNT=$((COUNT + 1))
+    done
+    if [ -n "$(consumers)" ]; then
+        log_stage 'SDIO consumers still hold device; unload not attempted'
+    elif [ -d "/sys/module/$MODULE" ]; then
+        log_stage "unloading $MODULE (without force)"
+        rmmod "$MODULE" &
+        REMOVE_PID=$!
+        COUNT=0
+        while kill -0 "$REMOVE_PID" 2>/dev/null && [ "$COUNT" -lt 10 ]; do
+            sleep 1
+            COUNT=$((COUNT + 1))
+        done
+        if kill -0 "$REMOVE_PID" 2>/dev/null; then
+            log_stage "module unload timed out after 10s; pid=$REMOVE_PID"
+            cat "/proc/$REMOVE_PID/wchan" "/proc/$REMOVE_PID/syscall" 2>/dev/null
+            kill -KILL "$REMOVE_PID" 2>/dev/null || true
+        else
+            wait "$REMOVE_PID"
+            RESULT=$?
+            if [ "$RESULT" -eq 0 ] && [ ! -d "/sys/module/$MODULE" ]; then
+                log_stage 'Wi-Fi driver unloaded; reboot notifier removed'
+            else
+                log_stage "Wi-Fi driver unload failed: status=$RESULT; shutdown not verified"
+            fi
+        fi
+    else
+        log_stage 'Wi-Fi driver not loaded; nothing to unload'
+    fi
+fi
+if [ -d "/sys/module/$MODULE" ]; then
+    log_stage 'WARNING: Wi-Fi driver remains loaded; kernel shutdown may still block'
+fi
+log_stage 'executing /sbin/poweroff via init'
+/sbin/poweroff
+RESULT=$?
+log_stage "poweroff command returned status=$RESULT; not proof of physical power-off"
+exit "$RESULT"

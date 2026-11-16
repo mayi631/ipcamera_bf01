@@ -3,6 +3,7 @@
 BASE=/mnt/data
 [ -x "$BASE/ipcamera" ] || BASE=/mnt/system/bf01-preview
 [ -x "$BASE/ipcamera" ] || exit 0
+[ ! -e /run/bf01-poweroff/requested ] || exit 0
 MODE=off
 CFG=/mnt/cfg/bf01-preview
 if ! awk '$2 == "/mnt/cfg" { found = 1 } END { exit !found }' /proc/mounts; then
@@ -40,14 +41,14 @@ trap shutdown_camera TERM INT
 if [ -x "$BASE/bf01-wifi" ] && [ "$MODE" != ap ]; then
     (
         exec 6>&-
-        while [ ! -f /run/bf01-preview/supervisor.stop ]; do
+        while [ ! -f /run/bf01-preview/supervisor.stop ] && [ ! -e /run/bf01-poweroff/requested ]; do
             "$BASE/bf01-wifi" start >>/run/bf01-preview/wifi-start.log 2>&1 </dev/null
             sleep 10
         done
     ) &
     WIFI_PID=$!
 fi
-while [ ! -f /run/bf01-preview/supervisor.stop ]; do
+while [ ! -f /run/bf01-preview/supervisor.stop ] && [ ! -e /run/bf01-poweroff/requested ]; do
     if [ -e /run/bf01-preview/boot-camera-started ]; then
         "$BASE/ipcamera" --live-camera -i "$BASE/param_config.ini" 6>&- >>/run/bf01-preview/service.log 2>&1 &
     else
