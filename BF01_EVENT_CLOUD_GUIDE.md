@@ -71,13 +71,13 @@ class_1 =
 
 随后平台要求图视频使用同一 `eventId`。16:37 独立诊断将两张鹦鹉图和既有录像关联为 `cb6e2b8e80aa5c56`，共用 `eventTime=1794386272059`，三次 PUT 及两次 report 成功，用户确认 APP 正常。该轮为人工关联测试材料，不是模型识别或固件自动拍摄，证据见 `out/bf01-linked-media-test-20261111-1635/RESULT.md`。正式链路已经在一次 `app_event_begin()` 后，把同一事件分别交给 `app_event_media(..., "image", ...)` 和 `app_event_media(..., "cloud_video", ...)`，不需要为录像另造事件 ID。
 
-任务保存在 `/mnt/sd/.capture/task_*/*.upload.json`，只接受指向 `/mnt/sd/DCIM/` 的完整媒体，校验源大小。普通错误保留媒体及状态，后续轮询重试；已完成 PUT 的任务恢复时不会重新 PUT。401 请求复用现有凭证刷新调度，不把 OSS 的 403 当设备 token 过期。
+任务保存在 `/mnt/sd/.capture/task_*/*.upload.json`，只接受指向 `/mnt/sd/DCIM/` 的完整媒体，校验源大小。上传线程只处理当前 Linux 启动的 `bootId` 任务；上一次启动遗留的照片、录像和清单保留在 SD 卡，但不会自动上传。当前启动内的普通错误、`uploading` 和 `put_uncertain` 都回到 `pending`，后续轮询允许从文件头重新 PUT；这不是字节级断点续传。401 请求复用现有凭证刷新调度，不把 OSS 的 403 当设备 token 过期。
 
 2026-11-12 实测云端新增必填校验：图片和视频 report 的 `files[].sha256` 必填，视频还要求 `files[].duration`（秒）。参考旧文档将两者列为可选，主控属性联动协议原字段清单也未列出，不能把这次 HTTP200 当业务成功。生产程序在 PUT 时流式计算实际上传包体的 SHA-256（加密时包括KLF1头、随机IV、密文和Tag），成功后以 `uploadedSha256` 与 uploaded 状态一起持久化，report 原样携带；不计算原始JPG/MP4摘要冒充密文摘要。录像完成时把实测 `recorded_ms / 1000` 保存为 `videoDuration`，视频 report 的 duration 来自它，不使用配置时长替代。
 
 旧版本已PUT成功但没有保存摘要的对象，不能用当前源文件或新随机IV重建原密文摘要。此类任务保留uploaded及原fileId/eventId，停止无效report并提示 `uploaded_hash_requires_reconciliation`；视频缺少有效实测时长时提示 `uploaded_duration_requires_reconciliation`。不得自动回pending重PUT或编造摘要/时长，需平台提供原对象摘要、可验证的读取接口或明确的兼容方案。新固件的新任务不需要客户命令。report业务拒绝时日志保留实际请求及业务响应，不再只有errno121。实际兼容修复及独立真实云验证见 `out/bf01-report-fix-20261112-1433/RESULT.md`，不能将独立验证替代新固件冷启动验收。
 
-断电/连接中断可能导致 PUT 已成功但本机未收到响应。`uploading`/`put_uncertain` 在恢复后停在 `put_requires_reconciliation`，不会盲目重复 PUT 或假报成功。当前协议没有对象状态查询/撤销接口；这类任务需平台提供核对或幂等方案后补充自动恢复。report 重试沿用同一个 eventId/fileId，其幂等性也需云端验收确认。
+断电/连接中断后，重启会按新的 `bootId` 跳过旧启动任务，不会盲目重传旧照片或录像；旧任务仍保留，便于人工核对。若进程在同一次启动内恢复，`uploading`/`put_uncertain` 会回到 `pending` 并从文件头重传，允许当前启动内的失败重试。当前协议没有字节级续传接口；report 重试沿用同一个 eventId/fileId，其幂等性仍需云端验收确认。
 
 ### SD 卡目录同步与只读保护（2026-11-12）
 
@@ -85,7 +85,7 @@ class_1 =
 
 原因是上传任务通过临时文件、文件 `fsync`、覆盖 `rename`、父目录 `fsync` 更新。异步 VFAT 中，覆盖重命名释放旧文件簇与新目录项落盘存在先后窗口，事后的父目录同步不能保护此前掉电；`dirsync` 使内核同步新目录项后再继续释放旧文件。2026-11-12 的实卡发现历史清单 `task_nwhtrb/cloud_video.upload.json` 仍引用簇151638，而两份 FAT 都将它标为空闲；上传线程替换旧清单时触发 `fat_free_clusters: deleting FAT entry beyond EOF`，内核保护转只读。隔离镜像在上述窗口复现相同断链，启用 `dirsync` 后同一故障点检查不再断链。首次损坏的具体断电时刻没有持久日志，不能据此宣称所有介质/供电因素都已排除。
 
-上传任务进入处理前检查真实挂载只读状态；只读时不发起云端处理，也不反复改写清单错误状态。仍可能存在检查后才发生介质错误的情况，后续实际写入错误仍必须处理。已损坏的卡需先备份、停止读写、卸载后离线修复，不能用重挂载或格式化掩盖问题。恢复清单必须保留原 `put_uncertain`、eventId 和 prepared 内容，不可重置为 pending。
+上传任务进入处理前检查真实挂载只读状态；只读时不发起云端处理，也不反复改写清单错误状态。只有当前启动的任务允许失败后回到 `pending`，旧启动任务不自动处理。仍可能存在检查后才发生介质错误的情况，后续实际写入错误仍必须处理。已损坏的卡需先备份、停止读写、卸载后离线修复，不能用重挂载或格式化掩盖问题。
 
 本轮已备份所有已分配簇及该异常簇，离线修复原卡后 `fsck -n` 返回0，真实挂载为 `rw,dirsync`，临时文件50次写入/替换/同步/读回测试通过。细节与原始证据见 `out/bf01-sd-fix-20261112/RESULT.md`。FAT不是日志文件系统，本次修复不能保证任意硬断电绝不损坏；新整包烧录后的冷启动、真实云上传及断电长稳仍需单独验收。
 

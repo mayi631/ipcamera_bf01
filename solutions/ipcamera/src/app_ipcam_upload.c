@@ -30,6 +30,30 @@ static char upload_state[64] = "idle";
 static char upload_event[17];
 static char upload_purpose[32];
 static char rejected_token[1025];
+static char upload_boot_id[64];
+static int upload_boot_valid;
+
+static int load_upload_boot_id(void)
+{
+    FILE *input = fopen("/proc/sys/kernel/random/boot_id", "r");
+    if (!input)
+        return errno;
+    int read_ok = fgets(upload_boot_id, sizeof(upload_boot_id), input) != NULL;
+    int error = read_ok ? 0 : (ferror(input) ? errno : EIO);
+    fclose(input);
+    upload_boot_id[strcspn(upload_boot_id, "\r\n")] = 0;
+    if (!error && !*upload_boot_id)
+        error = EPROTO;
+    upload_boot_valid = !error;
+    if (error)
+        upload_boot_id[0] = 0;
+    return error;
+}
+
+static int current_boot_job(const cJSON *job)
+{
+    return upload_boot_valid && !strcmp(app_event_text(job, "bootId"), upload_boot_id);
+}
 
 static void set_string(cJSON *object, const char *name, const char *value)
 {
@@ -342,8 +366,14 @@ static int process_job(const char *manifest, cJSON *job)
 {
     if (cancelled())
         return ECANCELED;
-    if (*app_event_text(job, "reconciliationRequired"))
-        return EINPROGRESS;
+    if (*app_event_text(job, "reconciliationRequired")) {
+        if (!current_boot_job(job))
+            return EINPROGRESS;
+        cJSON_DeleteItemFromObjectCaseSensitive(job, "reconciliationRequired");
+        int clear_error = app_event_write_json(manifest, job);
+        if (clear_error)
+            return clear_error;
+    }
     struct statvfs storage;
     if (statvfs("/mnt/sd", &storage))
         return errno;
@@ -352,15 +382,20 @@ static int process_job(const char *manifest, cJSON *job)
         return EROFS;
     }
     char state[32];
+    int error;
     snprintf(state, sizeof(state), "%s", app_event_text(job, "state"));
-    if (!strcmp(state, "uploading") || !strcmp(state, "put_uncertain"))
-        return pause_for_reconciliation(manifest, job, "put_requires_reconciliation", EINPROGRESS);
+    if (!strcmp(state, "uploading") || !strcmp(state, "put_uncertain")) {
+        error = save_state(manifest, job, "pending");
+        if (error)
+            return error;
+        strcpy(state, "pending");
+    }
     if (!strcmp(state, "uploaded")) {
         const char *reason = report_reconciliation_reason(job);
         if (reason)
             return pause_for_reconciliation(manifest, job, reason, ENODATA);
     }
-    int error = resolve_detection(job);
+    error = resolve_detection(job);
     if (error) {
         status(job, error == ENOKEY ? "waiting_class_mapping" : "invalid_detection", error);
         return error;
@@ -422,7 +457,7 @@ static int process_job(const char *manifest, cJSON *job)
         set_number(job, "lastHttpStatus", http_status);
         set_number(job, "lastUploadHttpStatus", http_status);
         if (error) {
-            save_state(manifest, job, http_status >= 400 && http_status < 500 && http_status != 409 ? "pending" : "put_uncertain");
+            save_state(manifest, job, "pending");
             notify(job, "upload", 1);
             notify(job, "done", 1);
             return error;
@@ -474,8 +509,7 @@ static void *upload_worker(void *context)
                 for (size_t index = 0; index < matches.gl_pathc && !cancelled(); index++) {
                     cJSON *job = NULL;
                     int error = app_event_read_json(matches.gl_pathv[index], &job);
-                    if (!error && strcmp(app_event_text(job, "state"), "done") &&
-                        !*app_event_text(job, "reconciliationRequired")) {
+                    if (!error && current_boot_job(job) && strcmp(app_event_text(job, "state"), "done")) {
                         error = process_job(matches.gl_pathv[index], job);
                         if (error && error != EROFS && !*app_event_text(job, "reconciliationRequired")) {
                             set_number(job, "lastError", error);
@@ -502,6 +536,9 @@ static void *upload_worker(void *context)
 int app_upload_start(void)
 {
     upload_stopping = 0;
+    int boot_error = load_upload_boot_id();
+    if (boot_error)
+        fprintf(stderr, "[upload] current boot id unavailable errno=%d; old manifests will not upload\n", boot_error);
     int error = pthread_create(&upload_thread, NULL, upload_worker, NULL);
     upload_running = !error;
     return error;
