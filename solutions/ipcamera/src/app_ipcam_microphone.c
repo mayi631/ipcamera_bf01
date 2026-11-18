@@ -8,9 +8,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "app_ipcam_microphone.h"
-
-#define MICROPHONE_DIRECTORY "/mnt/data/ipcamera-wifi"
-#define MICROPHONE_SETTING MICROPHONE_DIRECTORY "/microphone-enabled"
+#include "app_ipcam_settings.h"
 
 struct microphone_native_volume {
     unsigned int gain;
@@ -24,90 +22,32 @@ struct microphone_native_volume {
 
 static int microphone_lock(int operation)
 {
-    if (mkdir(MICROPHONE_DIRECTORY, 0700) && errno != EEXIST)
-        return -1;
-    int descriptor = open(MICROPHONE_DIRECTORY "/microphone.lock",
-        O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0600);
-    if (descriptor < 0)
-        return -1;
-    struct stat status;
-    int error = fstat(descriptor, &status) ? errno : !S_ISREG(status.st_mode) ? EINVAL : 0;
-    if (!error && flock(descriptor, operation))
-        error = errno;
-    if (error) {
-        close(descriptor);
-        errno = error;
-        return -1;
-    }
-    return descriptor;
+    return app_settings_lock(operation);
 }
 
 static int microphone_load(int *enabled)
 {
-    int descriptor = open(MICROPHONE_SETTING, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
-    if (descriptor < 0)
-        return errno;
-    struct stat status;
-    int error = fstat(descriptor, &status) ? errno : !S_ISREG(status.st_mode) ? EINVAL : 0;
-    char buffer[4] = {0};
-    ssize_t length = error ? -1 : read(descriptor, buffer, sizeof(buffer));
-    if (!error && length < 0)
-        error = errno;
-    close(descriptor);
-    if (error)
-        return error;
-    if ((length != 1 && length != 2) || (buffer[0] != '0' && buffer[0] != '1') ||
-        (length == 2 && buffer[1] != '\n'))
-        return EPROTO;
-    *enabled = buffer[0] == '1';
-    return 0;
-}
-
-static int microphone_sync(void)
-{
-    int descriptor = open(MICROPHONE_SETTING, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
-    if (descriptor < 0)
-        return errno;
-    int error = fsync(descriptor) ? errno : 0;
-    close(descriptor);
-    if (error)
-        return error;
-    descriptor = open(MICROPHONE_DIRECTORY, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (descriptor < 0)
-        return errno;
-    error = fsync(descriptor) ? errno : 0;
-    close(descriptor);
+    cJSON *settings = NULL;
+    int error = app_settings_load_locked(&settings);
+    const cJSON *value = cJSON_GetObjectItemCaseSensitive(settings, "mic_switch");
+    if (!error && !value)
+        error = ENOENT;
+    if (!error)
+        *enabled = cJSON_IsTrue(value);
+    cJSON_Delete(settings);
     return error;
 }
 
 static int microphone_save(int enabled, int *installed)
 {
     *installed = 0;
-    char temporary[128];
-    snprintf(temporary, sizeof(temporary), MICROPHONE_SETTING ".%ld", (long)getpid());
-    int descriptor = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
-    if (descriptor < 0)
-        return errno;
-    char buffer[] = { enabled ? '1' : '0', '\n' };
-    ssize_t written;
-    do {
-        written = write(descriptor, buffer, sizeof(buffer));
-    } while (written < 0 && errno == EINTR);
-    int error = written < 0 ? errno : written != (ssize_t)sizeof(buffer) ? EIO : 0;
-    if (!error && fsync(descriptor))
-        error = errno;
-    if (close(descriptor) && !error)
-        error = errno;
-    if (!error) {
-        if (rename(temporary, MICROPHONE_SETTING))
-            error = errno;
-        else
-            *installed = 1;
-    }
-    if (!error)
-        error = microphone_sync();
-    if (error)
-        unlink(temporary);
+    cJSON *changes = cJSON_CreateObject();
+    int error = !changes || !cJSON_AddBoolToObject(changes, "mic_switch", enabled) ? ENOMEM :
+        app_settings_apply_locked(changes);
+    cJSON_Delete(changes);
+    int actual = !enabled;
+    if (!microphone_load(&actual) && actual == enabled)
+        *installed = 1;
     return error;
 }
 
@@ -200,7 +140,7 @@ int app_ipcam_Microphone_Apply(int enabled, struct app_microphone_state *state)
     int verified = !error;
     int installed = 0;
     if (!error)
-        error = loaded == ENOENT || saved != enabled ? microphone_save(enabled, &installed) : microphone_sync();
+        error = loaded == ENOENT || saved != enabled ? microphone_save(enabled, &installed) : app_settings_sync_locked();
     if (error && changed && (!verified || (!installed && (loaded == ENOENT || saved != enabled)))) {
         int restored = microphone_mute(descriptor, previous_left.muted != 0, previous_right.muted != 0);
         if (!restored)

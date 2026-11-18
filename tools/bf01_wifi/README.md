@@ -4,7 +4,23 @@
 
 依据 `WIFI模块通讯/主控与WIFI属性联动协议.md`、`WIFI模块通讯/主控联调测试例子.md` 重新实现。
 
-## 当前生产行为
+## 统一参数文件（2026-11-17）
+
+APP可变参数的唯一生效文件已统一为 `/mnt/data/ipcamera-config/app-settings.json`（有真实CFG挂载时为 `/mnt/cfg/ipcamera/app-settings.json`），详见仓库根目录 `APP_SETTINGS.md`。新增 `bf01-wifi settings` / `ipcamera --settings-show` 查看同一份配置；音量、麦克风硬件设置、播放恢复和录音PCM策略也直接读取该文件，不再各存一份。旧 `event-policy.json`、`speaker-volume`、`microphone-enabled` 仅在统一文件不存在时迁移一次，迁移后不再读取或更新。统一文件损坏时明确报错，不回退旧值。
+
+## APP 参数接入（2026-11-17 统一版，待下次启动验收）
+
+- 沿用协议的 15 个主控设置键识别全量 `set`；后续单键、多键增量只合并收到的字段，不清空其余设置。首次全量完成之前的增量仍按握手约定返回 ACK2；未知键忽略，已知键类型、范围或日期格式不合法返回 ACK1。同 ID 重试沿用原有幂等机制。
+- 15 个主控设置键（包括未实现的预留设置）经统一管理器合并、原子保存到 `app-settings.json`。重复同值不重写文件。只收到精准率、时间戳等单项时，不用默认 AI 开关或录像时长覆盖本地原有默认配置。
+- AI 开关继续使用现有启动门控，不改变抓拍策略、直播优先级或当前正在执行的 AI 任务；新值供下一次抓拍启动使用。`image_filter_level` 的 `low/medium/high` 分别映射真实推理置信度阈值 `0.30/0.60/0.80`，不是识别准确率保证。未收到此键时保留本地 `boot_ai.ini`，启动日志显示实际阈值和来源。
+- `pir_record_dur=0/10/20/30` 使用现有录像入口。`-1` 的 AI 动态时长尚无后端：按本次用户要求保存并 ACK0，但在 `host_deferred_fields` 标记，当前明确固定回退为 10 秒，不把它描述为 AI 已决定时长。
+- 日期格式映射：`yyyy-MM-dd HH:mm:ss` → 0，`MM/dd/yyyy HH:mm:ss` → 1，`dd-MM-yyyy HH:mm:ss` → 2。Linux 相机启动后及运行期间每秒检查已保存策略，通过原 IPC 通道通知小核；小核确认配置接收后，在现有时间戳更新点切换开关和格式。`bf01-wifi camera-status` 的 `datetime_policy_errno` 为 0 表示策略已接收或没有覆盖配置；非 0 明确表示未确认，不能用 Wi-Fi ACK0 代替画面验收。此项必须配套重新编译、打包小核和应用，旧小核不支持新消息。
+- **早期首拍边界**：Linux 启动前已经拍下的 RTOS 照片仍使用小核内置 `[boot_timestamp]` 配置，不能追溯改水印；本轮没有新增小核跨断电配置存储。当前不是“断电重启首张照片也已跟随 APP 设置”的交付结论。
+- `pir_sens_level`、`pir_detect_intv`、`brand_wm_switch` 等未实现设置也持久化，并在本次处理的 `host_deferred_fields` 中标记；按用户本轮要求保存成功才暂回 ACK0，不代表真实硬件动作已完成。服务重启后的保存结果以直接读盘的 `host_saved_fields` 为准。`status_led_switch` 沿用未单列灯的原接收逻辑。`memory_format` 不属于设置占位，缺少后端仍 ACK2，绝不假装格式化成功。现有扬声器、麦克风后端保持不变，防闪烁补充启动恢复，真实执行错误仍拒绝成功。
+- `host_applied_fields` 的策略类字段表示已经持久化，不表示当前 AI 任务或早期首拍已变更；`event_policy_effect` 给出生效边界。编译/模拟验证与 ADB、COM9 实机验收分别记录，不互相替代。
+- 统一参数版验证：应用 ARM 编译、链接、管理器和音频适配器严格告警检查、脚本语法及差异格式检查通过；临时隔离回归覆盖全量/增量合并、同值不重写、独立进程重读、旧文件迁移、忽略过时旧值、并发写入与PCM锁、损坏配置拒绝回退、磁盘/同步/重命名错误，音频回归同时通过UBSan。17:42已通过ADB备份并原子替换板端应用和脚本，未停止进程、未重启、未提前生成统一文件；下次正常启动才迁移。旧版ADB/COM9结果不作为统一版业务验收；本轮未改小核、未验证统一版APP下发及实际媒体效果。
+
+## 先前生产行为记录
 
 - BF01 的 `make ... install` 同时把正式应用、`bf01-wifi`、`wifi/bf01-sdio-up.sh` 和 `auto.sh` 同步到 SDK `OUTPUT_DIR/data/`，避免应用目录已更新而 `pack_data` 仍打包旧程序。不会覆盖 SDK data 中既有 `param_config.ini`、`capture.ini`、`boot_ai.ini`；已有镜像仍须重新执行 SDK 数据分区打包，安装不等于烧录验收。
 - `bf01-wifi start|stop|status|get NAME|refresh-http|filter|camera-status|module-time|speaker-status|microphone-status|sync-clock` 管理真实应用服务；`get NAME` 通过现有生产服务串行排队查询，结果以该服务 wire 日志的对应 ID 应答为准，不另开 SDIO 消费者；`get http` 使用原凭证刷新流程。`filter` 只读模组 TCP 过滤表；`camera-status` 通过原相机进程读取 ISP/录像；`module-time` 读取无时区 native tm，不直接写 UTC；`speaker-status`、`microphone-status` 经同一正式服务只读 DAC/ADC 双声道增益、静音和已应用设置。
@@ -13,10 +29,13 @@
 - 凭证刷新 ACK2 是一轮完整回复。正式程序等 30 秒后换新 ID 最多再请求两轮，不用原 ID 冒充重新刷新。没有收到回复时才按原 ID 重试。
 - 自动刷新单独检查已经确认会话中的凭证到期时间；即使旧凭证已过期，仍按既有退避重新请求，不会因 `http_usable=false` 永久停止刷新。过期凭证仍不向业务开放，缺少全量 `report` 成功确认或尚未取得凭证时不启动该刷新；`status.http_refresh_due` 只读显示此条件。
 - 单条请求无回复不会清空其他排队请求或已经取得且未过期的凭证。`completed` 在重试耗尽时收到空回复，调用方须检查。
-- `image_anti_flicker` 通过原相机控制桥接到 ISP Get/Set/Get；相机在线时曾真实读回 `60Hz`，相机按原 AI 门控退出时仍返回未就绪，不沿用历史结果。`status_led_switch` 按协议对未单列灯的板型接收，不代表实际点灯。
+- APP 设置统一增量合并保存到真实已挂载配置分区的 `/mnt/cfg/ipcamera/app-settings.json`；没有 CFG 分区时使用 `/mnt/data/ipcamera-config/app-settings.json`，不写 `/run` 冒充持久化。全量、单项均只覆盖本包字段，缺失键保留，未收到的键不写默认值。原 INI 保留为未设置字段的默认配置，不以 INI 文件未变化判断 APP 设置丢失。
+- 保存使用互斥锁、临时文件、文件 `fsync`、原子替换、目录 `fsync` 和 JSON 读回校验；重复同值不重写。保存失败回 ACK2，不能把只更新内存算成功。`status.host_settings_path`、`host_settings_errno`、`host_saved_fields` 直接读取本地文件；`wifi_saved_dps` 仅为模组状态，`host_applied_fields` 仅为本次服务实际处理状态，不代表所有设置已在硬件生效。
+- AI 开关、识别阈值（低30%/中60%/高80%）、通知分类和录像时长由现有消费点读取该 JSON，下次启动不依赖模组再次下发；仅设置阈值不会覆盖原 INI 的 AI 开关或时长。`pir_record_dur=-1` 仅保存为预留自动时长，实际暂按10秒回退。时间戳开关及格式保存，但首拍时间戳生效时序另行处理；本轮不改变直播及其水印。
+- `image_anti_flicker` 通过原相机控制桥接到 ISP Get/Set/Get；相机暂不在线时保存后延后执行，下次正常相机初始化时从本地恢复并读回确认，日志明确记录恢复错误，不能以保存成功代替 ISP 生效。`status_led_switch` 按协议对未单列灯的板型接收，不代表实际点灯。
 - `spk_vol` 使用已有 `/dev/cvitekadac` 双声道 Set/Get 并读回确认，再持久化音量；不初始化 AO/AI、不操作 ADC 和功放 GPIO。真实全量 `set` 的 `80` 已将增益从 `32/32` 改为 `26/26`；重复同值不写硬件或设置文件。原播放 AO 初始化后恢复已应用音量，没有设置文件时保持原逻辑；寄存器读回不等于已经验证实际播放。
 - `mic_switch` 使用 `/dev/cvitekaadc` 只改左右静音位，Get/Set/Get 验证增益未变后持久化；错误不确认成功，尚未安装新策略时尝试恢复原静音位。实际收到 `false` 后读回左/右原生静音值1/2、增益保持9/0。BF01录像的RTOS和Linux两路PCM在原AAC写入点共同执行录音策略：关闭时用等长零样本保持PTS，未收到配置时保持原音频，不改变抓拍触发或录像时长。`app_ipcam_Microphone_GuardFrame()` 返回持有共享锁的文件描述符，调用方须在本次 `app_mp4_write_pcm()` 结束后关闭；设置使用互斥锁，避免确认后还有新读出的未静音PCM写入。损坏策略明确失败，不放开声音。实际MP4静音和恢复录音仍需正常相机流程验收，不能拿ADC位读回代替。
-- 其余 11 项没有真实执行后端，全量仍回 ACK2。`set_not_applied.field_errno` 为主控本地逐字段错误码：`38` 是执行后端未实现，`image_anti_flicker:2` 是本地相机套接字不存在，不是 Wi-Fi 协议 ACK2 的另一个名字。不能把 `wifi_saved_dps` 当作 `host_applied_fields`。
+- 按本次 APP 设置预留约定，尚无执行后端的 PIR 灵敏度/间隔、品牌水印等设置也落盘，保存成功后才可回 ACK0，并记入 `host_deferred_fields`；这不代表其业务功能已实现。`set_not_applied.field_errno` 为主控本地逐字段错误码：`38` 是执行后端未实现，`image_anti_flicker:2` 是本地相机套接字不存在，不是协议 ACK2 的另一个名字。格式化等瞬时动作不保存、不重放，不享受占位 ACK0；真实硬件错误仍回 ACK2。音量和麦克风保留真实硬件及恢复/录音策略，但持久化与读取全部改为统一JSON，不再维护音频独立参数文件。
 - 初次加载不再默认等45秒：先注册 cfg80211 与 SDIO 驱动，再等待 `mmc1` 的 `007a:6011`；支持先注册、后枚举自动绑定，不因已加载但尚未枚举而直接失败。未枚举时最多每2秒重扫一次，不重复加载、不解绑。Linux/RHEA/SDIO驱动先完成绑定并返回，后台独占worker反复做真实握手：检查总线宽度、必要时恢复SDIO通信、启用function并恢复块大小，再走原生WSM初始化；单轮WSM通知窗口1秒，失败清理线程/工作队列/缓存，清理完成1秒后重试，无总次数限制。总线操作和清理另有耗时，不代表整轮严格2秒。握手成功不再重试，不卸载模块、不解绑、不重置模组CPU。`bf01_startup_state` 显示 `handshaking/retry/ready/stopped` 及轮次/错误码；helper等真实ready后仍检查 `wlan0` 和控制接口，才启动网络watcher、协议和自动校时。枚举/绑定共享60秒限时，握手另有60秒限时，使用 `/proc/uptime`，不随校时变化；helper超时不停止驱动worker，后续supervisor继续检查。`startup-not-before` 保留显式研发下限，默认0；`network-start` 不等IP，`network`仍等真实IP。
 - 前两轮启动候选已被冷启动否定：先是短窗口超时，再是60秒等不到WSM；后一轮uptime25.9秒实收CMD52的IOEx/IORx/IF均为0，不能继续将可枚举当软件已就绪。当前后台重握手方案等待整机冷启动验收，软件测试不代替模组实机通知、联网或APP业务通过。仅主控重启/模组保电仍需独立验证。
 

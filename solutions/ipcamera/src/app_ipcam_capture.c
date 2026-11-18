@@ -25,6 +25,7 @@
 #include "cvi_mbuf.h"
 #include "minIni.h"
 #include "app_ipcam_event.h"
+#include "app_ipcam_settings.h"
 
 #define CAPTURE_RUN "/run/ipcamera-capture"
 #define CAPTURE_STORAGE APP_STORAGE_MOUNT
@@ -404,38 +405,44 @@ static int load_settings(struct capture_task *task, int *enabled)
         *enabled = 1;
         task->seconds = 10;
         task->channel = 0;
-        return 0;
+    } else {
+        if (access(config, R_OK) != 0)
+            return -1;
+        char text[32];
+        ini_gets("capture", "enabled", "1", text, sizeof(text), config);
+        if (parse_number(text, 0, 1, enabled) != 0)
+            return -1;
+        ini_gets("capture", "duration_seconds", "10", text, sizeof(text), config);
+        if (parse_number(text, 1, 300, &task->seconds) != 0)
+            return -1;
+        ini_gets("capture", "channel", "0", text, sizeof(text), config);
+        if (parse_number(text, 0, 2, &task->channel) != 0)
+            return -1;
     }
-    if (access(config, R_OK) != 0)
-        return -1;
-    char text[32];
-    ini_gets("capture", "enabled", "1", text, sizeof(text), config);
-    if (parse_number(text, 0, 1, enabled) != 0)
-        return -1;
-    ini_gets("capture", "duration_seconds", "10", text, sizeof(text), config);
-    if (parse_number(text, 1, 300, &task->seconds) != 0)
-        return -1;
-    ini_gets("capture", "channel", "0", text, sizeof(text), config);
-    return parse_number(text, 0, 2, &task->channel);
+    cJSON *settings = NULL;
+    int error = app_settings_load(&settings);
+    const cJSON *configured_enabled = cJSON_GetObjectItemCaseSensitive(settings, "capture_enabled");
+    const cJSON *configured_channel = cJSON_GetObjectItemCaseSensitive(settings, "capture_channel");
+    if (!error && configured_enabled)
+        *enabled = cJSON_IsTrue(configured_enabled);
+    if (!error && configured_channel)
+        task->channel = configured_channel->valueint;
+    cJSON_Delete(settings);
+    return error;
 }
 
 int app_ipcam_Capture_LoadAiEnabled(int *enabled)
 {
     if (!enabled)
         return -1;
-    char policy_path[PATH_MAX];
-    int policy_error = app_event_config_path("event-policy.json", policy_path, sizeof(policy_path));
-    if (policy_error && policy_error != ENODEV)
+    struct app_event_policy policy;
+    int policy_error = app_event_policy_load(&policy);
+    if (policy_error)
         return policy_error;
-    if (!policy_error && access(policy_path, F_OK) == 0) {
-        struct app_event_policy policy;
-        int error = app_event_policy_load(&policy);
-        if (!error)
-            *enabled = policy.ai_enabled;
-        return error;
+    if (policy.ai_configured) {
+        *enabled = policy.ai_enabled;
+        return 0;
     }
-    if (!policy_error && errno != ENOENT)
-        return errno;
     char config[PATH_MAX];
     int config_result = resolve_capture_config(config, sizeof(config));
     if (config_result < 0)
@@ -460,23 +467,15 @@ int app_ipcam_Capture_Configure(const char *seconds, const char *channel)
         fprintf(stderr, "Usage: ipcamera --capture-config SECONDS(1-300) CHANNEL(0-2)\n");
         return -1;
     }
-    char config[PATH_MAX];
-    int config_error = app_event_config_path("capture.ini", config, sizeof(config));
-    if (config_error)
-        return config_error;
-    config_error = app_event_config_prepare();
-    if (config_error)
-        return config_error;
-    char text[128];
-    int ai_enabled = 1;
-    if (app_ipcam_Capture_LoadAiEnabled(&ai_enabled) != 0)
-        ai_enabled = 1;
-    snprintf(text, sizeof(text), "[capture]\nenabled=1\nai_enabled=%d\nduration_seconds=%d\nchannel=%d\n",
-        ai_enabled, duration, selected);
-    if (save_file(config, text) != 0)
-        return -1;
-    printf("[capture] saved duration=%ds channel=%d; applies on the next application start\n", duration, selected);
-    return 0;
+    cJSON *changes = cJSON_CreateObject();
+    int error = !changes || !cJSON_AddTrueToObject(changes, "capture_enabled") ||
+        !cJSON_AddNumberToObject(changes, "capture_channel", selected) ||
+        !cJSON_AddNumberToObject(changes, "pir_record_dur", duration) ? ENOMEM : app_settings_apply(changes);
+    cJSON_Delete(changes);
+    if (!error)
+        printf("[capture] unified settings saved duration=%ds channel=%d; applies on the next application start\n",
+            duration, selected);
+    return error;
 }
 
 #ifdef AUDIO_SUPPORT
@@ -879,24 +878,16 @@ static void *capture_boot_run(void *opaque)
         task_status(&task, "disabled", 0);
         return NULL;
     }
-    char policy_path[PATH_MAX];
-    int policy_error = app_event_config_path("event-policy.json", policy_path, sizeof(policy_path));
-    if (policy_error && policy_error != ENODEV) {
-        task_status(&task, "failed", policy_error);
+    struct app_event_policy policy;
+    error = app_event_policy_load(&policy);
+    if (error) {
+        task_status(&task, "failed", error);
         return NULL;
     }
-    if (!policy_error && access(policy_path, F_OK) == 0) {
-        struct app_event_policy policy;
-        error = app_event_policy_load(&policy);
-        if (error) {
-            task_status(&task, "failed", error);
-            return NULL;
-        }
-        task.seconds = policy.record_seconds;
-    } else if (!policy_error && errno != ENOENT) {
-        task_status(&task, "failed", errno);
-        return NULL;
-    }
+    if (policy.record_configured)
+        task.seconds = policy.record_seconds < 0 ? 10 : policy.record_seconds;
+    if (policy.record_seconds < 0)
+        fprintf(stderr, "[capture] APP AI duration (-1) reserved; using fixed 10s until backend is implemented\n");
 #ifdef BF01_BOOT_CAPTURE
     task_status(&task, "receiving_rtos_photos", 0);
     error = app_ipcam_BootCapture_Stage(&task.burst, capture_cancelled);

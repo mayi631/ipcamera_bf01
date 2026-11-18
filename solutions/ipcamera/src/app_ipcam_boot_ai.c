@@ -217,6 +217,14 @@ static int load_job(struct ai_job *job)
     if (errno || end == confidence || *end || !isfinite(job->confidence) ||
         job->confidence <= 0 || job->confidence > 1)
         return EINVAL;
+    struct app_event_policy policy;
+    error = app_event_policy_load(&policy);
+    if (error)
+        return error;
+    if (policy.confidence_percent)
+        job->confidence = (float)policy.confidence_percent / 100.0f;
+    fprintf(stderr, "[boot-ai] confidence=%.2f source=%s\n", job->confidence,
+        policy.confidence_percent ? "APP image_filter_level" : "boot_ai.ini");
     long class_id, timeout_ms;
     if (setting_integer(config, "class_id", "-1", &class_id) ||
         setting_integer(config, "timeout_ms", "12000", &timeout_ms) ||

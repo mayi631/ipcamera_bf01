@@ -1,6 +1,14 @@
 # BF01 照片、录像画面时间戳
 
-## 配置开关
+## APP 设置优先
+
+APP的`datetime_wm_switch`及`datetime_wm_format`以统一`app-settings.json`为准；缺失键才采用下述INI默认。Linux运行时IPC确认不能修改早于其启动已经编码的照片，因此新增双槽派生缓存：FSBL在释放小核前读取，小核在媒体初始化前采用，避免首拍使用旧格式而录像后半段才切换。
+
+三种APP字符串依次映射为0/1/2：`yyyy-MM-dd HH:mm:ss`、`MM/dd/yyyy HH:mm:ss`、`dd-MM-yyyy HH:mm:ss`。没有把格式硬编码为月日年；开关和格式的单独设置也会保留另一个已存字段。
+
+需要配套BSP的`0046`、`0047`公共补丁、新分区布局、FSBL、小核及应用。首次升级保留已有APP参数时，必须用实存JSON生成缓存种子并保留该JSON，不能指望Linux启动后补发IPC挽回第一次首拍。详细升级限制见`../bf01_bsp/docs/BF01_TIMESTAMP_BOOT_SETTINGS.md`及`APP_SETTINGS.md`。
+
+## 出厂默认开关
 
 编辑应用源码 `resource/parameter/fbm/cv1815ja_bf01_gc4683.ini`：
 
@@ -27,21 +35,22 @@ external_rtc_utc_offset_minutes = 480
 | `1` | 月/日/年 时:分:秒 | `11/06/2026 13:24:56` |
 | `2` | 日-月-年 时:分:秒 | `06-11-2026 13:24:56` |
 
-这是小核首拍前就要使用的启动参数，不是 Linux `capture.ini` 中的运行时开关。
-当前 A/B 分区布局没有 CFG/独立参数分区，不能依赖 `param.bin` 预加载到共享参数区。
+这是APP键缺失或缓存失效时使用的默认值，不是Linux `capture.ini`中的运行时开关。
+不复用SDK媒体`param.bin`、A/B的`misc`或RTC寄存器保存APP参数。
 
 BF01 fastboot 的 Makefile 在调用 scons 前运行 BSP 中的
 `generate_timestamp_config.py`，从上述应用 INI 生成
 `cvi_alios/solutions/fastboot/out/bf01_boot_timestamp_config.h`，随小核镜像内置。
-开机不读取 Linux 文件系统、不增加 NAND 参数读取，也不等待大核或 SD 卡挂载。
+同时生成`timestamp.bin`与`timestamp_bak.bin`。开机由FSBL有界读取两个原始缓存槽，
+不让小核访问NAND驱动，不读取Linux文件系统，也不等待大核或SD卡挂载。
 配置值非法或应用 INI 缺失会中止构建；内容未变化时不改头文件时间，避免无谓重编译。
 
 需要同时具备 BSP 定制目录、`patches/0039-cvi_alios--feat-generate-bf01-timestamp-configuration.patch`
 中的 SDK Makefile 修改，以及 `patches/0040-cvi_alios--fix-pthread-getschedparam-declaration.patch`
 中的 POSIX 公共头文件声明补齐，使用正常 `build_alios`/`build_all` 流程构建。
-切换开关、格式或时区后，必须重新编译并更新小核 `yoc.bin`。
-只修改板端 `/mnt/data/param_config.ini`、`capture.ini` 或只更新 `data.spinand`
-不会改变首拍设置。首次还需更新应用，以获得 RTC 校时接口。
+修改这里的INI出厂默认或时区时，仍需重新编译并更新小核`yoc.bin`。
+完整升级到启动缓存方案之后，APP设置开关、格式不再需要重编小核，保存成功供下次启动使用。
+只改旧板端INI或只更新`data.spinand`不能代替首次完整固件升级。
 
 ## 实现范围
 
@@ -57,7 +66,7 @@ BF01 fastboot 的 Makefile 在调用 scons 前运行 BSP 中的
   如果准备尚未完成，记录 `prepare pending; photo does not wait for watermark`，
   本帧不保证有水印，优先保持拍照时序。准备线程只在连拍结束后回收。
 - 不修改 ISP bypass、sensor 参数、预热丢帧、连拍间隔和原有 pipeline。
-  关闭水印时不创建准备线程或 RGN。
+  关闭水印时准备线程直接返回，不创建RGN。
 
 ## 时间来源与异常
 

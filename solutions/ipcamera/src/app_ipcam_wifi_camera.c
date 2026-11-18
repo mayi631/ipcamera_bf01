@@ -13,6 +13,9 @@
 #include "app_ipcam_wifi_camera.h"
 #include "app_ipcam_stream.h"
 #include "app_ipcam_vi.h"
+#include "app_ipcam_boot_timestamp.h"
+#include "app_ipcam_event.h"
+#include "app_ipcam_settings.h"
 #include "cvi_ae.h"
 
 #define CAMERA_RUN "/run/ipcamera-wifi"
@@ -136,6 +139,18 @@ int app_ipcam_WifiCamera_Start(void)
         return error;
     }
     camera_listener = descriptor;
+    cJSON *settings = NULL;
+    int settings_error = app_settings_load(&settings);
+    const cJSON *flicker = cJSON_GetObjectItemCaseSensitive(settings, "image_anti_flicker");
+    if (!settings_error && flicker) {
+        cJSON *observed = cJSON_CreateObject();
+        settings_error = observed ? camera_exposure(flicker->valuestring, observed) : ENOMEM;
+        cJSON_Delete(observed);
+        fprintf(stderr, "[wifi-camera] restore image_anti_flicker=%s errno=%d\n",
+            flicker->valuestring, settings_error);
+    } else if (settings_error)
+        fprintf(stderr, "[wifi-camera] load saved settings errno=%d\n", settings_error);
+    cJSON_Delete(settings);
     fprintf(stderr, "[wifi-camera] production control ready pid=%ld\n", (long)getpid());
     return 0;
 }
@@ -171,6 +186,9 @@ void app_ipcam_WifiCamera_Poll(void)
             cJSON_AddNumberToObject(reply, "isp_errno", isp_error);
             camera_record(reply);
             app_ipcam_Stream_Status(reply);
+#ifdef BF01_BOOT_CAPTURE
+            cJSON_AddNumberToObject(reply, "datetime_policy_errno", app_ipcam_BootTimestampApplyPolicy());
+#endif
             error = 0;
         } else if (!strcmp(operation->valuestring, "apply") && cJSON_IsString(setting))
             error = camera_exposure(setting->valuestring, reply);

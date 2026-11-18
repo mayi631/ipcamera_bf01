@@ -5,6 +5,7 @@
 int app_ipcam_BootTimestampLockIpc(void);
 void app_ipcam_BootTimestampPoll(void);
 int app_ipcam_BootTimestampSyncRtc(void);
+int app_ipcam_BootTimestampApplyPolicy(void);
 #endif
 
 #endif

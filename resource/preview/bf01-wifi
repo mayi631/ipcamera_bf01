@@ -111,6 +111,7 @@ case "${1:-status}" in
         fi
         ;;
     status) exec "$BASE/ipcamera" --wifi-status ;;
+    settings) exec "$BASE/ipcamera" --settings-show ;;
     get)
         [ "$#" -eq 2 ] || { echo 'Usage: bf01-wifi get NAME (queued through the production service)' >&2; exit 2; }
         exec "$BASE/ipcamera" --wifi-get "$2"
@@ -166,5 +167,5 @@ case "${1:-status}" in
         log_stage 'Clock synchronization failed; supervisor will retry without bypassing HTTP clock checks'
         exit 1
         ;;
-    *) echo 'Usage: bf01-wifi {start|stop|status|get NAME|refresh-http|filter|camera-status|module-time|speaker-status|microphone-status|sync-clock}' >&2; exit 2 ;;
+    *) echo 'Usage: bf01-wifi {start|stop|status|settings|get NAME|refresh-http|filter|camera-status|module-time|speaker-status|microphone-status|sync-clock}' >&2; exit 2 ;;
 esac

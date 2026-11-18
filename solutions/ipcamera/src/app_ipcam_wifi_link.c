@@ -26,6 +26,7 @@
 #include "app_ipcam_storage.h"
 #include "bf01_wifi_link.h"
 #include "app_ipcam_event.h"
+#include "app_ipcam_settings.h"
 #include "app_ipcam_upload.h"
 
 #define WIFI_RUN "/run/ipcamera-wifi"
@@ -274,6 +275,11 @@ static int wifi_apply(void *context, const cJSON *changes, int full)
         return 2;
     }
     int blocked = 0;
+    cJSON *saved_changes = cJSON_CreateObject();
+    if (!saved_changes) {
+        cJSON_Delete(failure);
+        return 2;
+    }
     const cJSON *field;
     cJSON_ArrayForEach(field, changes) {
 
@@ -311,30 +317,31 @@ static int wifi_apply(void *context, const cJSON *changes, int full)
                 cJSON_AddNumberToObject(failure, "mic_left_gain", state.left_gain);
                 cJSON_AddNumberToObject(failure, "mic_right_gain", state.right_gain);
             }
-        } else if (!strcmp(field->string, "ai_detect_switch") || !strcmp(field->string, "bird_detect_switch") ||
-            !strcmp(field->string, "squirrel_detect_switch") || !strcmp(field->string, "other_detect_switch") ||
-            !strcmp(field->string, "pir_record_dur")) {
-            cJSON *change = cJSON_CreateObject();
-            if (!change || !cJSON_AddItemToObject(change, field->string, cJSON_Duplicate(field, 1)))
-                error = ENOMEM;
-            else
-                error = app_event_policy_apply(change);
-            cJSON_Delete(change);
+        } else if (app_event_policy_field(field->string)) {
+            if (!strcmp(field->string, "pir_record_dur") && field->valueint == -1)
+                error = ENOSYS;
         } else if (strcmp(field->string, "status_led_switch"))
             error = ENOSYS;
+        int deferred = (error == ENOSYS && strcmp(field->string, "memory_format")) ||
+            (!strcmp(field->string, "image_anti_flicker") &&
+             (error == ENOENT || error == ECONNREFUSED));
+        if ((!error || deferred) &&
+            !cJSON_AddItemToObject(saved_changes, field->string, cJSON_Duplicate(field, 1))) {
+            error = ENOMEM;
+            deferred = 0;
+        }
         if (error) {
             cJSON_AddItemToArray(fields, cJSON_CreateString(field->string));
             cJSON_AddNumberToObject(field_errors, field->string, error);
             cJSON_DeleteItemFromObjectCaseSensitive(service->applied_fields, field->string);
-            int deferred = (error == ENOSYS && strcmp(field->string, "memory_format")) ||
-                (!strcmp(field->string, "image_anti_flicker") &&
-                 (error == ENOENT || error == ECONNREFUSED));
             if (deferred) {
                 cJSON_DeleteItemFromObjectCaseSensitive(service->deferred_fields, field->string);
                 if (!cJSON_AddItemToObject(service->deferred_fields, field->string, cJSON_Duplicate(field, 1)))
                     blocked = 1;
-            } else
+            } else {
+                cJSON_DeleteItemFromObjectCaseSensitive(service->deferred_fields, field->string);
                 blocked = 1;
+            }
         } else {
             cJSON_DeleteItemFromObjectCaseSensitive(service->deferred_fields, field->string);
             cJSON_DeleteItemFromObjectCaseSensitive(service->applied_fields, field->string);
@@ -344,6 +351,24 @@ static int wifi_apply(void *context, const cJSON *changes, int full)
             }
         }
     }
+    int save_error = saved_changes->child ? app_settings_apply(saved_changes) : 0;
+    cJSON_AddNumberToObject(failure, "settings_save_errno", save_error);
+    if (save_error) {
+        blocked = 1;
+        cJSON_ArrayForEach(field, saved_changes) {
+            if (!cJSON_GetObjectItemCaseSensitive(field_errors, field->string))
+                cJSON_AddItemToArray(fields, cJSON_CreateString(field->string));
+            cJSON_DeleteItemFromObjectCaseSensitive(field_errors, field->string);
+            cJSON_AddNumberToObject(field_errors, field->string, save_error);
+            cJSON_DeleteItemFromObjectCaseSensitive(service->applied_fields, field->string);
+            cJSON_DeleteItemFromObjectCaseSensitive(service->deferred_fields, field->string);
+        }
+    }
+    char settings_path[PATH_MAX] = "";
+    app_settings_path(settings_path, sizeof(settings_path));
+    fprintf(stderr, "[wifi-link] settings save full=%d fields=%d path=%s errno=%d\n",
+        full, cJSON_GetArraySize(saved_changes), settings_path, save_error);
+    cJSON_Delete(saved_changes);
     cJSON_AddItemToObject(failure, "applied_fields", cJSON_Duplicate(service->applied_fields, 1));
     cJSON_Delete(service->apply_failure);
     service->apply_failure = failure;
@@ -708,8 +733,19 @@ static cJSON *service_status(struct wifi_service *service)
         cJSON_AddItemToObject(status, "wifi", cJSON_Duplicate(service->status, 1));
     if (service->dps)
         cJSON_AddItemToObject(status, "wifi_saved_dps", cJSON_Duplicate(service->dps, 1));
-    cJSON_AddStringToObject(status, "settings_backend", "persistent_event_policy_and_status_led_speaker_microphone_camera_partial");
-    cJSON_AddStringToObject(status, "settings_ack_policy", "accept_unimplemented_settings");
+    cJSON_AddStringToObject(status, "settings_backend", "unified_app_settings_v1");
+    cJSON_AddStringToObject(status, "settings_ack_policy", "save_before_ack;accept_saved_unimplemented_settings");
+    char settings_path[PATH_MAX] = "";
+    int settings_error = app_settings_path(settings_path, sizeof(settings_path));
+    cJSON *saved_settings = NULL;
+    if (!settings_error)
+        settings_error = app_settings_load(&saved_settings);
+    cJSON_AddStringToObject(status, "host_settings_path", settings_path);
+    cJSON_AddNumberToObject(status, "host_settings_errno", settings_error);
+    if (saved_settings)
+        cJSON_AddItemToObject(status, "host_saved_fields", saved_settings);
+    cJSON_AddStringToObject(status, "event_policy_effect", "next_capture_ai_and_duration;datetime_async_rtos");
+    cJSON_AddStringToObject(status, "pir_record_dur_auto", "reserved_fixed_10s_fallback");
     if (service->applied_fields)
         cJSON_AddItemToObject(status, "host_applied_fields", cJSON_Duplicate(service->applied_fields, 1));
     if (service->deferred_fields)
@@ -942,6 +978,10 @@ int app_ipcam_Wifi_Service(void)
         fprintf(stderr, "[wifi-link] another production consumer owns the service\n");
         if (lock >= 0)
             close(lock);
+        return EXIT_FAILURE;
+    }
+    if (app_settings_init()) {
+        close(lock);
         return EXIT_FAILURE;
     }
     struct wifi_service service = { .sdio = { .descriptor = -1 } };

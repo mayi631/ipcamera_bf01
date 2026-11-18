@@ -21,6 +21,7 @@
 #include "app_ipcam_wifi_link.h"
 #include "app_ipcam_wifi_camera.h"
 #include "app_ipcam_event.h"
+#include "app_ipcam_settings.h"
 #include "app_ipcam_power_guard.h"
 
 /**************************************************************************
@@ -313,6 +314,11 @@ int main(int argc, char *argv[])
         }
         return app_ipcam_Capture_Configure(argv[2], argv[3]) == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
     }
+    if (argc == 2 && !strcmp(argv[1], "--settings-show"))
+        return app_settings_show() == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+    if (argc == 2 && !strcmp(argv[1], "--settings-sync-boot"))
+        return app_settings_sync_boot() == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+    APP_CHK_RET(app_settings_init(), "load unified APP settings");
 #ifdef AUDIO_SUPPORT
     APP_CHK_RET(app_ipcam_Audio_SpeakerDisable(), "disable speaker before startup");
 #endif

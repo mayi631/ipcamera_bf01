@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <sys/file.h>
 #include <sys/stat.h>
@@ -11,10 +12,70 @@
 #include <unistd.h>
 #include "bf01_boot_timestamp.h"
 #include "cvi_ipcm.h"
+#include "app_ipcam_event.h"
+
 
 static uint32_t expected_clock_seconds;
 static int clock_reply_error;
 static int ipc_lock_fd = -1;
+static pthread_mutex_t settings_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int settings_registered;
+static uint32_t settings_reply;
+static uint32_t settings_applied;
+
+static int receive_settings_reply(void *private_data, IPCM_ANON_MSG_S *message)
+{
+    (void)private_data;
+    if (!message || message->u8PortID != BF01_TIMESTAMP_CLOCK_REPLY_PORT ||
+        message->u8MsgID != BF01_TIMESTAMP_SETTINGS_MESSAGE || message->u8DataType != IPCM_MSG_TYPE_RAW_PARAM)
+        return -EINVAL;
+    __atomic_store_n(&settings_reply, message->u32Param, __ATOMIC_RELEASE);
+    return 0;
+}
+
+int app_ipcam_BootTimestampApplyPolicy(void)
+{
+    struct app_event_policy policy;
+    int error = app_event_policy_load(&policy);
+    if (error)
+        return error;
+    uint32_t requested = BF01_TIMESTAMP_SETTINGS_MAGIC;
+    if (policy.datetime_enabled >= 0)
+        requested |= 0x100U | (uint32_t)policy.datetime_enabled;
+    if (policy.datetime_format >= 0)
+        requested |= 0x200U | ((uint32_t)policy.datetime_format << 1);
+    if (requested == BF01_TIMESTAMP_SETTINGS_MAGIC)
+        return 0;
+    pthread_mutex_lock(&settings_mutex);
+    if (requested == settings_applied)
+        goto done;
+    if (!settings_registered) {
+        if (CVI_IPCM_RegisterAnonHandle(BF01_TIMESTAMP_CLOCK_REPLY_PORT, receive_settings_reply, NULL) != CVI_SUCCESS) {
+            error = EIO;
+            goto done;
+        }
+        settings_registered = 1;
+    }
+    __atomic_store_n(&settings_reply, 0, __ATOMIC_RELEASE);
+    if (CVI_IPCM_AnonSendParam(BF01_TIMESTAMP_CLOCK_PORT, BF01_TIMESTAMP_SETTINGS_MESSAGE, requested) != CVI_SUCCESS)
+        error = EIO;
+    else {
+        for (unsigned int attempt = 0; attempt < 250; attempt++) {
+            if (__atomic_load_n(&settings_reply, __ATOMIC_ACQUIRE) == requested)
+                break;
+            usleep(1000);
+        }
+        if (__atomic_load_n(&settings_reply, __ATOMIC_ACQUIRE) != requested)
+            error = ETIMEDOUT;
+    }
+    if (!error)
+        settings_applied = requested;
+    fprintf(stderr, "[boot-timestamp] APP settings enabled=%d format=%d confirmed=%d errno=%d\n",
+        policy.datetime_enabled, policy.datetime_format, !error, error);
+done:
+    pthread_mutex_unlock(&settings_mutex);
+    return error;
+}
 
 int app_ipcam_BootTimestampLockIpc(void)
 {
@@ -57,6 +118,11 @@ void app_ipcam_BootTimestampPoll(void)
     static uint64_t last_poll_ms;
     static int clock_warned;
     uint64_t now_ms = monotonic_ms();
+    static uint64_t last_settings_poll_ms;
+    if (!last_settings_poll_ms || now_ms - last_settings_poll_ms >= 1000) {
+        last_settings_poll_ms = now_ms;
+        app_ipcam_BootTimestampApplyPolicy();
+    }
     if (last_poll_ms && now_ms - last_poll_ms < 60000)
         return;
     last_poll_ms = now_ms;

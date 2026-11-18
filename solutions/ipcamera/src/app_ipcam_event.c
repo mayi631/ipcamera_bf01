@@ -12,6 +12,7 @@
 #include <time.h>
 #include <unistd.h>
 #include "app_ipcam_event.h"
+#include "app_ipcam_settings.h"
 
 #define LIVE_FILE "/run/ipcamera-wifi/live-mode"
 #define BOOT_CANCEL_FILE "/run/ipcamera-wifi/boot-media-cancelled"
@@ -54,6 +55,8 @@ static int config_directory(char *directory, size_t capacity, int create)
         return errno;
     if (!S_ISDIR(info.st_mode) || info.st_uid != geteuid())
         return EACCES;
+    if ((info.st_mode & 07777) == 0700)
+        return 0;
     return chmod(directory, 0700) ? errno : 0;
 }
 
@@ -177,19 +180,43 @@ int app_event_write_json(const char *path, const cJSON *value)
     return error;
 }
 
+static int filter_percent(const cJSON *value)
+{
+    if (!cJSON_IsString(value))
+        return 0;
+    return !strcmp(value->valuestring, "low") ? 30 : !strcmp(value->valuestring, "medium") ? 60 :
+        !strcmp(value->valuestring, "high") ? 80 : 0;
+}
+
+static int datetime_format(const cJSON *value)
+{
+    if (!cJSON_IsString(value))
+        return -1;
+    return !strcmp(value->valuestring, "yyyy-MM-dd HH:mm:ss") ? 0 :
+        !strcmp(value->valuestring, "MM/dd/yyyy HH:mm:ss") ? 1 :
+        !strcmp(value->valuestring, "dd-MM-yyyy HH:mm:ss") ? 2 : -1;
+}
+
+int app_event_policy_field(const char *name)
+{
+    return name && (!strcmp(name, "pir_record_dur") || !strcmp(name, "ai_detect_switch") ||
+        !strcmp(name, "bird_detect_switch") || !strcmp(name, "squirrel_detect_switch") ||
+        !strcmp(name, "other_detect_switch") || !strcmp(name, "image_filter_level") ||
+        !strcmp(name, "datetime_wm_switch") || !strcmp(name, "datetime_wm_format"));
+}
+
 int app_event_policy_load(struct app_event_policy *policy)
 {
-    *policy = (struct app_event_policy){1, 1, 1, 0, 10};
+    *policy = (struct app_event_policy){
+        .ai_enabled = 1, .bird_alarm = 1, .squirrel_alarm = 1, .record_seconds = 10,
+        .datetime_enabled = -1, .datetime_format = -1
+    };
     cJSON *saved = NULL;
-    char policy_file[PATH_MAX];
-    int error = app_event_config_path("event-policy.json", policy_file, sizeof(policy_file));
-    if (!error)
-        error = app_event_read_json(policy_file, &saved);
-    if (error == ENOENT || error == ENODEV)
-        return 0;
+    int error = app_settings_load(&saved);
     if (error)
         return error;
     const char *names[] = {"ai_detect_switch", "bird_detect_switch", "squirrel_detect_switch", "other_detect_switch"};
+    policy->ai_configured = cJSON_GetObjectItemCaseSensitive(saved, "ai_detect_switch") != NULL;
     int *destinations[] = {&policy->ai_enabled, &policy->bird_alarm, &policy->squirrel_alarm, &policy->other_alarm};
     for (size_t index = 0; index < 4; index++) {
         const cJSON *value = cJSON_GetObjectItemCaseSensitive(saved, names[index]);
@@ -200,70 +227,29 @@ int app_event_policy_load(struct app_event_policy *policy)
     }
     const cJSON *duration = cJSON_GetObjectItemCaseSensitive(saved, "pir_record_dur");
     if (duration) {
-        if (!cJSON_IsNumber(duration) || (duration->valuedouble != 0 && duration->valuedouble != 10 &&
-            duration->valuedouble != 20 && duration->valuedouble != 30))
+        policy->record_configured = 1;
+        policy->record_seconds = duration->valueint;
+    }
+    const cJSON *filter = cJSON_GetObjectItemCaseSensitive(saved, "image_filter_level");
+    if (filter) {
+        policy->confidence_percent = filter_percent(filter);
+        if (!policy->confidence_percent)
+            error = EPROTO;
+    }
+    const cJSON *enabled = cJSON_GetObjectItemCaseSensitive(saved, "datetime_wm_switch");
+    if (enabled) {
+        if (!cJSON_IsBool(enabled))
             error = EPROTO;
         else
-            policy->record_seconds = duration->valueint;
+            policy->datetime_enabled = cJSON_IsTrue(enabled);
+    }
+    const cJSON *format = cJSON_GetObjectItemCaseSensitive(saved, "datetime_wm_format");
+    if (format) {
+        policy->datetime_format = datetime_format(format);
+        if (policy->datetime_format < 0)
+            error = EPROTO;
     }
     cJSON_Delete(saved);
-    return error;
-}
-
-int app_event_policy_apply(const cJSON *changes)
-{
-    if (!cJSON_IsObject(changes))
-        return EINVAL;
-    char directory[PATH_MAX], policy_file[PATH_MAX], lock_file[PATH_MAX];
-    int error = config_directory(directory, sizeof(directory), 1);
-    if (!error)
-        error = app_event_config_path("event-policy.json", policy_file, sizeof(policy_file));
-    if (!error)
-        error = app_event_config_path("event-policy.lock", lock_file, sizeof(lock_file));
-    if (error)
-        return error;
-    int lock = open(lock_file, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
-    if (lock < 0)
-        return errno;
-    error = flock(lock, LOCK_EX | LOCK_NB) ? errno : 0;
-    int changed = 0;
-    cJSON *saved = NULL;
-    if (!error) {
-        error = app_event_read_json(policy_file, &saved);
-        if (error == ENOENT) {
-            saved = cJSON_CreateObject();
-            error = saved ? 0 : ENOMEM;
-        }
-    }
-    const cJSON *field;
-    cJSON_ArrayForEach(field, changes) {
-        if (error)
-            break;
-        if (!field->string || (strcmp(field->string, "pir_record_dur") && strcmp(field->string, "ai_detect_switch") &&
-            strcmp(field->string, "bird_detect_switch") && strcmp(field->string, "squirrel_detect_switch") &&
-            strcmp(field->string, "other_detect_switch"))) {
-            error = ENOTSUP;
-            break;
-        }
-        int duration = !strcmp(field->string, "pir_record_dur");
-        if (duration ? (!cJSON_IsNumber(field) || (field->valuedouble != 0 && field->valuedouble != 10 &&
-            field->valuedouble != 20 && field->valuedouble != 30)) : !cJSON_IsBool(field)) {
-            error = ENOTSUP;
-            break;
-        }
-        const cJSON *previous = cJSON_GetObjectItemCaseSensitive(saved, field->string);
-        if (duration ? (cJSON_IsNumber(previous) && previous->valuedouble == field->valuedouble) :
-            (cJSON_IsBool(previous) && cJSON_IsTrue(previous) == cJSON_IsTrue(field)))
-            continue;
-        changed = 1;
-        cJSON_DeleteItemFromObjectCaseSensitive(saved, field->string);
-        if (!cJSON_AddItemToObject(saved, field->string, cJSON_Duplicate(field, 1)))
-            error = ENOMEM;
-    }
-    if (!error && changed)
-        error = app_event_write_json(policy_file, saved);
-    cJSON_Delete(saved);
-    close(lock);
     return error;
 }
 

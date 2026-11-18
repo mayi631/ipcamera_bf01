@@ -9,9 +9,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "app_ipcam_speaker.h"
-
-#define SPEAKER_DIRECTORY "/mnt/data/ipcamera-wifi"
-#define SPEAKER_SETTING SPEAKER_DIRECTORY "/speaker-volume"
+#include "app_ipcam_settings.h"
 
 struct speaker_native_volume {
     unsigned int gain;
@@ -25,73 +23,28 @@ struct speaker_native_volume {
 
 static int speaker_lock(void)
 {
-    if (mkdir(SPEAKER_DIRECTORY, 0700) && errno != EEXIST)
-        return -1;
-    int descriptor = open(SPEAKER_DIRECTORY "/speaker.lock", O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0600);
-    if (descriptor < 0)
-        return -1;
-    if (flock(descriptor, LOCK_EX | LOCK_NB)) {
-        int error = errno;
-        close(descriptor);
-        errno = error;
-        return -1;
-    }
-    return descriptor;
+    return app_settings_lock(LOCK_EX | LOCK_NB);
 }
 
 static int speaker_load(unsigned int *percent)
 {
-    int descriptor = open(SPEAKER_SETTING, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (descriptor < 0)
-        return errno;
-    char buffer[32];
-    ssize_t length = read(descriptor, buffer, sizeof(buffer) - 1);
-    int error = length < 0 ? errno : 0;
-    close(descriptor);
-    if (error)
-        return error;
-    if (length <= 0 || (size_t)length == sizeof(buffer) - 1)
-        return EPROTO;
-    buffer[length] = 0;
-    if (buffer[0] < '0' || buffer[0] > '9')
-        return EPROTO;
-    char *end;
-    errno = 0;
-    unsigned long parsed = strtoul(buffer, &end, 10);
-    if (errno || parsed > 100 || parsed % 5 || (*end && strcmp(end, "\n")))
-        return EPROTO;
-    *percent = (unsigned int)parsed;
-    return 0;
+    cJSON *settings = NULL;
+    int error = app_settings_load_locked(&settings);
+    const cJSON *value = cJSON_GetObjectItemCaseSensitive(settings, "spk_vol");
+    if (!error && !value)
+        error = ENOENT;
+    if (!error)
+        *percent = (unsigned int)value->valueint;
+    cJSON_Delete(settings);
+    return error;
 }
 
 static int speaker_save(unsigned int percent)
 {
-    char temporary[128];
-    snprintf(temporary, sizeof(temporary), SPEAKER_SETTING ".%ld", (long)getpid());
-    int descriptor = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
-    if (descriptor < 0)
-        return errno;
-    char buffer[16];
-    int length = snprintf(buffer, sizeof(buffer), "%u\n", percent);
-    int error = write(descriptor, buffer, (size_t)length) == length ? 0 : errno ? errno : EIO;
-    if (!error && fsync(descriptor))
-        error = errno;
-    if (close(descriptor) && !error)
-        error = errno;
-    if (!error && rename(temporary, SPEAKER_SETTING))
-        error = errno;
-    if (!error) {
-        int directory = open(SPEAKER_DIRECTORY, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-        if (directory < 0)
-            error = errno;
-        else {
-            if (fsync(directory))
-                error = errno;
-            close(directory);
-        }
-    }
-    if (error)
-        unlink(temporary);
+    cJSON *changes = cJSON_CreateObject();
+    int error = !changes || !cJSON_AddNumberToObject(changes, "spk_vol", percent) ? ENOMEM :
+        app_settings_apply_locked(changes);
+    cJSON_Delete(changes);
     return error;
 }
 
@@ -123,6 +76,10 @@ static void speaker_state(struct app_speaker_state *state, const struct speaker_
 static int speaker_apply_locked(unsigned int percent, struct app_speaker_state *state, int persist)
 {
     _Static_assert(sizeof(struct speaker_native_volume) == 8, "CV181x DAC volume ABI mismatch");
+    unsigned int saved = 0;
+    int loaded = speaker_load(&saved);
+    if (loaded && loaded != ENOENT)
+        return loaded;
     int descriptor = open("/dev/cvitekadac", O_RDWR | O_CLOEXEC | O_NOFOLLOW);
     if (descriptor < 0)
         return errno;
@@ -145,10 +102,15 @@ static int speaker_apply_locked(unsigned int percent, struct app_speaker_state *
     if (!error && (!speaker_matches(&left, target.gain, target.muted) ||
                    !speaker_matches(&right, target.gain, target.muted)))
         error = EIO;
-    unsigned int saved = 0;
-    if (!error && persist && (speaker_load(&saved) || saved != percent))
-        error = speaker_save(percent);
-    if (error && changed) {
+    int verified = !error;
+    int installed = 0;
+    if (!error && persist) {
+        error = loaded == ENOENT || saved != percent ? speaker_save(percent) : app_settings_sync_locked();
+        unsigned int actual = 0;
+        if (!speaker_load(&actual) && actual == percent)
+            installed = 1;
+    }
+    if (error && changed && (!verified || !installed)) {
         int restored_left = ioctl(descriptor, SPEAKER_SET_LEFT, &previous_left);
         int restored_right = ioctl(descriptor, SPEAKER_SET_RIGHT, &previous_right);
         if (restored_left || restored_right)
@@ -209,15 +171,10 @@ int app_ipcam_Speaker_Apply(unsigned int percent, struct app_speaker_state *stat
 int app_ipcam_Speaker_Restore(void)
 {
     unsigned int percent = 0;
-    int error = speaker_load(&percent);
-    if (error == ENOENT)
-        return 0;
-    if (error)
-        return error;
     int lock = speaker_lock();
     if (lock < 0)
         return errno;
-    error = speaker_load(&percent);
+    int error = speaker_load(&percent);
     if (!error) {
         struct app_speaker_state state = {0};
         error = speaker_apply_locked(percent, &state, 0);
