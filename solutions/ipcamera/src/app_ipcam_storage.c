@@ -8,14 +8,19 @@
 #include <mntent.h>
 #include <poll.h>
 #include <pthread.h>
+#include <signal.h>
+#include <spawn.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mount.h>
+#include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 #include "app_ipcam_storage.h"
 
@@ -52,6 +57,47 @@ static const char *storage_state = "starting";
 static int storage_error;
 static uint64_t storage_free;
 static uint64_t storage_total;
+static int storage_access = -1;
+static ino_t storage_format_identity;
+static struct timespec storage_format_time;
+static pthread_mutex_t format_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_t format_thread;
+static int format_started;
+static int format_running;
+static int format_stopping;
+static int format_initial_pending;
+static int format_final_pending;
+static struct app_storage_status format_initial;
+
+static uint64_t storage_clock(void)
+{
+    struct timespec timestamp;
+    if (clock_gettime(CLOCK_MONOTONIC, &timestamp))
+        return 0;
+    return (uint64_t)timestamp.tv_sec * 1000 + timestamp.tv_nsec / 1000000;
+}
+
+static int storage_lock(int exclusive, int *descriptor)
+{
+    *descriptor = -1;
+    if (mkdir(STORAGE_RUN, 0700) && errno != EEXIST)
+        return errno;
+    int access = open(STORAGE_RUN "/access.lock", O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (access < 0)
+        return errno;
+    if (flock(access, (exclusive ? LOCK_EX : LOCK_SH) | LOCK_NB)) {
+        int error = errno;
+        close(access);
+        return error == EWOULDBLOCK ? EBUSY : error;
+    }
+    *descriptor = access;
+    return 0;
+}
+
+int app_ipcam_Storage_Lock(int *descriptor)
+{
+    return descriptor ? storage_lock(0, descriptor) : EINVAL;
+}
 
 static int find_card(struct storage_card *card)
 {
@@ -136,10 +182,11 @@ static void publish_status(void)
     if (!file)
         return;
     int written = fprintf(file, "[storage]\nstate=%s\nerror=%d\ndevice=%s\nmount_point=%s\n"
-        "ready=%d\ngeneration=%llu\nactive_users=%u\ntotal_bytes=%llu\nfree_bytes=%llu\n",
+        "ready=%d\ngeneration=%llu\nactive_users=%u\ntotal_bytes=%llu\nfree_bytes=%llu\nuptime_ms=%llu\n",
         storage_state, storage_error, storage_card.device, APP_STORAGE_MOUNT,
         storage_ready, (unsigned long long)storage_generation, storage_users,
-        (unsigned long long)storage_total, (unsigned long long)storage_free);
+        (unsigned long long)storage_total, (unsigned long long)storage_free,
+        (unsigned long long)storage_clock());
     int closed = fclose(file);
     if (written > 0 && closed == 0)
         rename(STORAGE_RUN "/status.tmp", STORAGE_RUN "/status.ini");
@@ -342,7 +389,26 @@ static void *storage_monitor(void *opaque)
             pthread_mutex_unlock(&storage_mutex);
             break;
         }
-        refresh_storage(removed_event());
+        int access = -1;
+        int error = app_ipcam_Storage_Lock(&access);
+        if (!error) {
+            struct stat format = {0};
+            ino_t identity = !stat(STORAGE_RUN "/format.status", &format) ? format.st_ino : 0;
+            if (identity != storage_format_identity || format.st_mtim.tv_sec != storage_format_time.tv_sec ||
+                format.st_mtim.tv_nsec != storage_format_time.tv_nsec) {
+                storage_format_identity = identity;
+                storage_format_time = format.st_mtim;
+                storage_generation++;
+                storage_ready = 0;
+            }
+            refresh_storage(removed_event());
+            close(access);
+        } else {
+            if (strcmp(storage_state, "formatting"))
+                storage_generation++;
+            storage_ready = 0;
+            set_state(error == EBUSY ? "formatting" : "io_error", error);
+        }
         publish_status();
         pthread_mutex_unlock(&storage_mutex);
         struct pollfd event = { .fd = storage_socket, .events = POLLIN };
@@ -411,6 +477,10 @@ int app_ipcam_Storage_Acquire(uint64_t *generation)
     int error = storage_started && !storage_stopping && storage_ready ? 0 :
         (storage_error ? storage_error : ENODEV);
     if (!error) {
+        if (!storage_users)
+            error = app_ipcam_Storage_Lock(&storage_access);
+    }
+    if (!error) {
         *generation = storage_generation;
         storage_users++;
     }
@@ -446,7 +516,359 @@ void app_ipcam_Storage_ReportError(uint64_t generation, int error)
 void app_ipcam_Storage_Release(void)
 {
     pthread_mutex_lock(&storage_mutex);
-    if (storage_users)
-        storage_users--;
+    if (storage_users && !--storage_users) {
+        close(storage_access);
+        storage_access = -1;
+    }
     pthread_mutex_unlock(&storage_mutex);
+}
+
+static void cached_status(struct app_storage_status *status)
+{
+    FILE *file = fopen(STORAGE_RUN "/status.ini", "r");
+    if (!file)
+        return;
+    struct app_storage_status cached = {0};
+    unsigned long long updated = 0;
+    char line[256];
+    while (fgets(line, sizeof(line), file)) {
+        unsigned long long value;
+        if (sscanf(line, "state=%31s", cached.state) == 1 ||
+            sscanf(line, "device=%63s", cached.device) == 1 ||
+            sscanf(line, "error=%d", &cached.error) == 1 ||
+            sscanf(line, "ready=%d", &cached.ready) == 1)
+            continue;
+        if (sscanf(line, "generation=%llu", &value) == 1)
+            cached.generation = value;
+        else if (sscanf(line, "total_bytes=%llu", &value) == 1)
+            cached.total_bytes = value;
+        else if (sscanf(line, "free_bytes=%llu", &value) == 1)
+            cached.free_bytes = value;
+        else
+            sscanf(line, "uptime_ms=%llu", &updated);
+    }
+    fclose(file);
+    uint64_t now = storage_clock();
+    if (updated && now >= updated && now - updated <= 2000 && *cached.state)
+        *status = cached;
+}
+
+static void read_format(char *state, size_t capacity, int busy)
+{
+    snprintf(state, capacity, "success");
+    FILE *file = fopen(STORAGE_RUN "/format.status", "r");
+    if (file) {
+        char saved[16];
+        if (fscanf(file, "%15s", saved) == 1 &&
+            (!strcmp(saved, "formatting") || !strcmp(saved, "success") || !strcmp(saved, "fail")))
+            snprintf(state, capacity, "%s", !strcmp(saved, "formatting") && !busy ? "fail" : saved);
+        else
+            snprintf(state, capacity, "fail");
+        fclose(file);
+    }
+    if (busy)
+        snprintf(state, capacity, "formatting");
+}
+
+int app_ipcam_Storage_Status(struct app_storage_status *status)
+{
+    if (!status)
+        return EINVAL;
+    memset(status, 0, sizeof(*status));
+    cached_status(status);
+    int access = -1;
+    int error = app_ipcam_Storage_Lock(&access);
+    read_format(status->format_status, sizeof(status->format_status), error == EBUSY);
+    if (error) {
+        snprintf(status->state, sizeof(status->state), "%s", error == EBUSY ? "formatting" : "io_error");
+        status->ready = 0;
+        status->error = error;
+        return 0;
+    }
+    struct storage_card card = {0};
+    struct storage_mount mounted = {0};
+    int found = find_card(&card);
+    error = found < 0 || read_mounts(&card, &mounted) ? EIO : 0;
+    if (!error && !found) {
+        memset(status, 0, sizeof(*status));
+        snprintf(status->state, sizeof(status->state), "no_card");
+        status->error = ENODEV;
+    } else if (!error) {
+        if (strcmp(status->device, card.device))
+            memset(status, 0, sizeof(*status));
+        snprintf(status->device, sizeof(status->device), "%s", card.device);
+        if (!mounted.found || strcmp(mounted.device, card.device)) {
+            snprintf(status->state, sizeof(status->state), "%s", mounted.found ? "mount_conflict" : "mount_failed");
+            status->ready = 0;
+            status->error = mounted.found ? EBUSY : ENXIO;
+            status->total_bytes = status->free_bytes = 0;
+        } else {
+            struct statvfs info;
+            if (statvfs(APP_STORAGE_MOUNT, &info))
+                error = errno;
+            else {
+                status->total_bytes = (uint64_t)info.f_blocks * info.f_frsize;
+                status->free_bytes = (uint64_t)info.f_bfree * info.f_frsize;
+                if (mounted.readonly || (info.f_flag & ST_RDONLY)) {
+                    snprintf(status->state, sizeof(status->state), "read_only");
+                    status->ready = 0;
+                    status->error = EROFS;
+                } else if ((uint64_t)info.f_bavail * info.f_frsize < STORAGE_MIN_FREE) {
+                    snprintf(status->state, sizeof(status->state), "full");
+                    status->ready = 0;
+                    status->error = ENOSPC;
+                } else if (!*status->state || !strcmp(status->state, "formatting")) {
+                    snprintf(status->state, sizeof(status->state), "ready");
+                    status->ready = 1;
+                    status->error = 0;
+                }
+            }
+        }
+    }
+    if (error) {
+        snprintf(status->state, sizeof(status->state), "io_error");
+        status->ready = 0;
+        status->error = error;
+        status->total_bytes = status->free_bytes = 0;
+    }
+    read_format(status->format_status, sizeof(status->format_status), 0);
+    close(access);
+    return 0;
+}
+
+int app_ipcam_Storage_ReportStatus(struct app_storage_status *status)
+{
+    if (!status)
+        return EINVAL;
+    pthread_mutex_lock(&format_mutex);
+    int pending = format_initial_pending;
+    if (pending)
+        *status = format_initial;
+    pthread_mutex_unlock(&format_mutex);
+    return pending ? 0 : app_ipcam_Storage_Status(status);
+}
+
+void app_ipcam_Storage_Reported(const char *state)
+{
+    pthread_mutex_lock(&format_mutex);
+    if (state && !strcmp(state, "formatting"))
+        format_initial_pending = 0;
+    else if (state && !format_initial_pending && !format_running &&
+             (!strcmp(state, "success") || !strcmp(state, "fail")))
+        format_final_pending = 0;
+    pthread_mutex_unlock(&format_mutex);
+}
+
+void app_ipcam_Storage_ReportReset(void)
+{
+    pthread_mutex_lock(&format_mutex);
+    format_initial_pending = 0;
+    pthread_mutex_unlock(&format_mutex);
+}
+
+static int save_format(const char *state)
+{
+    int descriptor = open(STORAGE_RUN "/format.status.tmp", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (descriptor < 0)
+        return errno;
+    size_t length = strlen(state);
+    int error = write(descriptor, state, length) == (ssize_t)length && !fsync(descriptor) ? 0 : EIO;
+    if (close(descriptor) && !error)
+        error = errno;
+    if (!error && rename(STORAGE_RUN "/format.status.tmp", STORAGE_RUN "/format.status"))
+        error = errno;
+    if (error)
+        unlink(STORAGE_RUN "/format.status.tmp");
+    return error;
+}
+
+struct format_task {
+    struct storage_card card;
+    char tool[64];
+    int access;
+};
+
+static int same_card(const struct storage_card *expected)
+{
+    struct storage_card detected = {0};
+    return find_card(&detected) == 1 && !strcmp(expected->device, detected.device) &&
+        expected->identity == detected.identity && expected->number == detected.number;
+}
+
+static int format_filesystem(const struct format_task *task)
+{
+    int descriptor = open(task->card.device, O_RDWR | O_EXCL | O_CLOEXEC | O_NOFOLLOW);
+    if (descriptor < 0)
+        return errno;
+    struct stat info;
+    int error = fstat(descriptor, &info) ? errno :
+        !S_ISBLK(info.st_mode) || info.st_rdev != task->card.number || !same_card(&task->card) ? ENODEV : 0;
+    posix_spawn_file_actions_t actions;
+    int initialized = 0;
+    if (!error) {
+        error = posix_spawn_file_actions_init(&actions);
+        initialized = !error;
+    }
+    if (!error)
+        error = posix_spawn_file_actions_adddup2(&actions, descriptor, STDIN_FILENO);
+    if (!error)
+        error = posix_spawn_file_actions_adddup2(&actions, task->access, 3);
+    if (!error)
+        error = posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, STORAGE_RUN "/format.log", O_WRONLY | O_CREAT | O_APPEND, 0600);
+    if (!error)
+        error = posix_spawn_file_actions_adddup2(&actions, STDOUT_FILENO, STDERR_FILENO);
+    pid_t child = -1;
+    char *arguments[] = { (char *)task->tool, "-n", "BF01", "/proc/self/fd/0", NULL };
+    extern char **environ;
+    if (!error) {
+        pthread_mutex_lock(&format_mutex);
+        error = format_stopping ? ECANCELED : posix_spawn(&child, task->tool, &actions, NULL, arguments, environ);
+        pthread_mutex_unlock(&format_mutex);
+    }
+    if (initialized)
+        posix_spawn_file_actions_destroy(&actions);
+    uint64_t deadline = storage_clock() + 120000;
+    while (!error && child > 0) {
+        int result = 0;
+        pid_t finished = waitpid(child, &result, WNOHANG);
+        if (finished == child) {
+            error = WIFEXITED(result) && !WEXITSTATUS(result) ? 0 : EIO;
+            break;
+        }
+        if (finished < 0 && errno != EINTR) {
+            error = errno;
+            break;
+        }
+        pthread_mutex_lock(&format_mutex);
+        int stopping = format_stopping;
+        pthread_mutex_unlock(&format_mutex);
+        int removed = !same_card(&task->card);
+        if (stopping || removed || storage_clock() >= deadline) {
+            kill(child, SIGKILL);
+            while (waitpid(child, NULL, 0) < 0 && errno == EINTR) {}
+            error = stopping ? ECANCELED : removed ? ENODEV : ETIMEDOUT;
+            break;
+        }
+        usleep(100000);
+    }
+    if (!error && fsync(descriptor))
+        error = errno;
+    close(descriptor);
+    return error;
+}
+
+static void *format_worker(void *opaque)
+{
+    struct format_task *task = opaque;
+    struct storage_mount mounted = {0};
+    pthread_mutex_lock(&format_mutex);
+    int stopping = format_stopping;
+    pthread_mutex_unlock(&format_mutex);
+    int error = stopping ? ECANCELED : !same_card(&task->card) ? ENODEV :
+        read_mounts(&task->card, &mounted) ? EIO : 0;
+    int unmounted = 0;
+    if (!error && (mounted.elsewhere || (mounted.found && strcmp(mounted.device, task->card.device))))
+        error = EBUSY;
+    if (!error && mounted.found && umount(APP_STORAGE_MOUNT))
+        error = errno;
+    else if (!error)
+        unmounted = 1;
+    if (!error)
+        error = format_filesystem(task);
+    if (unmounted && same_card(&task->card)) {
+        if (mount(task->card.device, APP_STORAGE_MOUNT, "vfat", MS_NODEV | MS_NOSUID | MS_NOATIME | MS_DIRSYNC, NULL)) {
+            if (!error)
+                error = errno;
+        } else if (!error && probe_writable())
+            error = errno ? errno : EIO;
+    } else if (!error)
+        error = ENODEV;
+    int save_error = save_format(error ? "fail" : "success");
+    if (!error)
+        error = save_error;
+    fprintf(stderr, "[storage] format finished device=%s errno=%d status=%s\n",
+        task->card.device, error, error ? "fail" : "success");
+    pthread_mutex_lock(&format_mutex);
+    close(task->access);
+    free(task);
+    format_running = 0;
+    pthread_mutex_unlock(&format_mutex);
+    return NULL;
+}
+
+int app_ipcam_Storage_Format(void)
+{
+    pthread_mutex_lock(&format_mutex);
+    if (format_running || format_initial_pending || format_final_pending || format_stopping) {
+        pthread_mutex_unlock(&format_mutex);
+        return EBUSY;
+    }
+    if (format_started) {
+        pthread_join(format_thread, NULL);
+        format_started = 0;
+    }
+    struct format_task *task = calloc(1, sizeof(*task));
+    if (task)
+        task->access = -1;
+    int error = task ? app_ipcam_Storage_Status(&format_initial) : ENOMEM;
+    if (!error)
+        error = storage_lock(1, &task->access);
+    if (!error) {
+        int found = find_card(&task->card);
+        error = found == 1 ? 0 : found ? EIO : ENODEV;
+    }
+    if (!error) {
+        const char *tools[] = { "/sbin/mkfs.vfat", "/usr/sbin/mkfs.vfat", "/sbin/mkdosfs", "/usr/sbin/mkdosfs" };
+        for (size_t index = 0; index < sizeof(tools) / sizeof(tools[0]); index++) {
+            if (!access(tools[index], X_OK)) {
+                snprintf(task->tool, sizeof(task->tool), "%s", tools[index]);
+                break;
+            }
+        }
+        if (!*task->tool)
+            error = ENOSYS;
+    }
+    if (!error) {
+        struct storage_mount mounted = {0};
+        error = read_mounts(&task->card, &mounted) ? EIO : mounted.elsewhere ||
+            (mounted.found && strcmp(mounted.device, task->card.device)) ? EBUSY : 0;
+    }
+    if (!error)
+        error = save_format("formatting");
+    if (!error) {
+        snprintf(format_initial.state, sizeof(format_initial.state), "formatting");
+        snprintf(format_initial.format_status, sizeof(format_initial.format_status), "formatting");
+        format_initial.ready = 0;
+        format_initial.error = 0;
+        format_initial_pending = 1;
+        format_final_pending = 1;
+        format_running = 1;
+        error = pthread_create(&format_thread, NULL, format_worker, task);
+        if (!error)
+            format_started = 1;
+        else {
+            format_final_pending = format_initial_pending = format_running = 0;
+            save_format("fail");
+        }
+    }
+    if (error && task) {
+        if (task->access >= 0)
+            close(task->access);
+        free(task);
+    }
+    pthread_mutex_unlock(&format_mutex);
+    return error;
+}
+
+void app_ipcam_Storage_FormatStop(void)
+{
+    pthread_mutex_lock(&format_mutex);
+    format_stopping = 1;
+    int started = format_started;
+    pthread_mutex_unlock(&format_mutex);
+    if (started)
+        pthread_join(format_thread, NULL);
+    pthread_mutex_lock(&format_mutex);
+    format_started = 0;
+    pthread_mutex_unlock(&format_mutex);
 }

@@ -12,6 +12,7 @@
 #include <unistd.h>
 #include "app_ipcam_event.h"
 #include "app_ipcam_upload.h"
+#include "app_ipcam_storage.h"
 #include "bf01_cloud.h"
 #include "minIni.h"
 
@@ -503,7 +504,8 @@ static void *upload_worker(void *context)
 {
     (void)context;
     while (!stopping()) {
-        if (!app_event_live()) {
+        int access = -1;
+        if (!app_event_live() && !app_ipcam_Storage_Lock(&access)) {
             glob_t matches = {0};
             if (!glob("/mnt/sd/.capture/task_*/*.upload.json", 0, NULL, &matches)) {
                 for (size_t index = 0; index < matches.gl_pathc && !cancelled(); index++) {
@@ -526,6 +528,7 @@ static void *upload_worker(void *context)
                 }
             }
             globfree(&matches);
+            close(access);
         }
         for (unsigned int interval = 0; interval < 100 && !stopping(); interval++)
             usleep(100000);

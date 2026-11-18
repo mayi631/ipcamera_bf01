@@ -4,7 +4,6 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <math.h>
-#include <mntent.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdint.h>
@@ -14,7 +13,6 @@
 #include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/statvfs.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -284,6 +282,8 @@ static int wifi_apply(void *context, const cJSON *changes, int full)
     cJSON_ArrayForEach(field, changes) {
 
         int error = 0;
+        if (!strcmp(field->string, "memory_format"))
+            continue;
         if (!strcmp(field->string, "image_anti_flicker")) {
             cJSON *request = cJSON_CreateObject();
             cJSON *reply = NULL;
@@ -369,6 +369,14 @@ static int wifi_apply(void *context, const cJSON *changes, int full)
     fprintf(stderr, "[wifi-link] settings save full=%d fields=%d path=%s errno=%d\n",
         full, cJSON_GetArraySize(saved_changes), settings_path, save_error);
     cJSON_Delete(saved_changes);
+    if (!blocked && cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(changes, "memory_format"))) {
+        int format_error = app_ipcam_Storage_Format();
+        if (format_error) {
+            blocked = 1;
+            cJSON_AddItemToArray(fields, cJSON_CreateString("memory_format"));
+            cJSON_AddNumberToObject(field_errors, "memory_format", format_error);
+        }
+    }
     cJSON_AddItemToObject(failure, "applied_fields", cJSON_Duplicate(service->applied_fields, 1));
     cJSON_Delete(service->apply_failure);
     service->apply_failure = failure;
@@ -389,34 +397,15 @@ static int wifi_apply(void *context, const cJSON *changes, int full)
     return 0;
 }
 
-static int storage_report(cJSON **value)
+static int storage_report(cJSON **value, int reporting)
 {
-    FILE *mounts = setmntent("/proc/mounts", "r");
-    if (!mounts)
-        return 2;
-    struct mntent entry;
-    char buffer[4096];
-    int mounted = 0;
-    int readonly = 0;
-    while (getmntent_r(mounts, &entry, buffer, sizeof(buffer))) {
-        if (!strcmp(entry.mnt_dir, APP_STORAGE_MOUNT)) {
-            mounted = 1;
-            readonly = hasmntopt(&entry, "ro") != NULL;
-            break;
-        }
-    }
-    int error = ferror(mounts);
-    endmntent(mounts);
+    struct app_storage_status status;
+    int error = reporting ? app_ipcam_Storage_ReportStatus(&status) : app_ipcam_Storage_Status(&status);
     if (error)
         return 2;
-    struct statvfs storage = {0};
-    int unreadable = mounted && statvfs(APP_STORAGE_MOUNT, &storage);
-    double total = 0;
-    double used = 0;
-    if (mounted && !unreadable) {
-        total = ceil((double)storage.f_blocks * storage.f_frsize / 1000000000.0);
-        used = floor((double)(storage.f_blocks - storage.f_bfree) * storage.f_frsize / 100000000.0) / 10;
-    }
+    double total = ceil((double)status.total_bytes / 1000000000.0);
+    uint64_t used_bytes = status.total_bytes > status.free_bytes ? status.total_bytes - status.free_bytes : 0;
+    double used = floor((double)used_bytes / 100000000.0) / 10;
     *value = cJSON_CreateObject();
     cJSON *capacity = cJSON_CreateObject();
     if (!*value || !capacity) {
@@ -428,9 +417,10 @@ static int storage_report(cJSON **value)
     cJSON_AddNumberToObject(capacity, "total", total);
     cJSON_AddNumberToObject(capacity, "used", used);
     cJSON_AddItemToObject(*value, "memory_capacity", capacity);
-    cJSON_AddStringToObject(*value, "memory_status", !mounted ? "unmount" :
-                            readonly || unreadable ? "error" : "normal");
-    cJSON_AddStringToObject(*value, "memory_format_status", "success");
+    cJSON_AddStringToObject(*value, "memory_status", !strcmp(status.state, "no_card") ? "unmount" :
+        !strcmp(status.state, "ready") || !strcmp(status.state, "full") ||
+        !strcmp(status.state, "formatting") ? "normal" : "error");
+    cJSON_AddStringToObject(*value, "memory_format_status", status.format_status);
     cJSON_AddStringToObject(*value, "firmware_version", WIFI_VERSION);
     return 0;
 }
@@ -439,7 +429,7 @@ static int wifi_snapshot(void *context, const char *name, cJSON **value)
 {
     (void)context;
     if (!strcmp(name, "report"))
-        return storage_report(value);
+        return storage_report(value, 1);
     if (!strcmp(name, "status")) {
         cJSON *request = cJSON_CreateObject();
         cJSON *reply = NULL;
@@ -453,7 +443,7 @@ static int wifi_snapshot(void *context, const char *name, cJSON **value)
         const cJSON *state = cJSON_GetObjectItemCaseSensitive(stream, "state");
         if (error || !cJSON_IsString(record) || !cJSON_IsString(state) ||
             (strcmp(state->valuestring, "pushing") && strcmp(state->valuestring, "idle") && strcmp(state->valuestring, "fail")) ||
-            storage_report(value)) {
+            storage_report(value, 0)) {
             cJSON_Delete(reply);
             return 2;
         }
@@ -671,6 +661,13 @@ static void wifi_completed(void *context, const cJSON *request, const cJSON *rep
     const cJSON *command = cJSON_GetObjectItemCaseSensitive(request, "cmd");
     const cJSON *name = cJSON_GetObjectItemCaseSensitive(request, "name");
     const cJSON *result = cJSON_GetObjectItemCaseSensitive(reply, "result");
+    if (cJSON_IsString(command) && !strcmp(command->valuestring, "report") &&
+        cJSON_IsNumber(result) && !result->valueint) {
+        const cJSON *properties = cJSON_GetObjectItemCaseSensitive(request, "properties");
+        const cJSON *state = cJSON_GetObjectItemCaseSensitive(properties, "memory_format_status");
+        if (cJSON_IsString(state))
+            app_ipcam_Storage_Reported(state->valuestring);
+    }
     if (!cJSON_IsString(command) || strcmp(command->valuestring, "get") || !cJSON_IsString(name))
         return;
     cJSON **destination = !strcmp(name->valuestring, "status") ? &service->status :
@@ -729,6 +726,17 @@ static cJSON *service_status(struct wifi_service *service)
     cJSON_AddBoolToObject(status, "http_usable", bf_wifi_http(service->link, wifi_clock(CLOCK_REALTIME)) != NULL);
     cJSON_AddBoolToObject(status, "http_refresh_due", bf_wifi_http_refresh_due(service->link, wifi_clock(CLOCK_REALTIME)));
     cJSON_AddBoolToObject(status, "clock_valid", wifi_clock(CLOCK_REALTIME) >= 1000000000000ULL);
+    struct app_storage_status storage;
+    int storage_error = app_ipcam_Storage_Status(&storage);
+    cJSON_AddNumberToObject(status, "storage_snapshot_errno", storage_error);
+    if (!storage_error) {
+        cJSON_AddStringToObject(status, "storage_state", storage.state);
+        cJSON_AddStringToObject(status, "storage_device", storage.device);
+        cJSON_AddNumberToObject(status, "storage_errno", storage.error);
+        cJSON_AddNumberToObject(status, "storage_total_bytes", (double)storage.total_bytes);
+        cJSON_AddNumberToObject(status, "storage_free_bytes", (double)storage.free_bytes);
+        cJSON_AddStringToObject(status, "memory_format_status", storage.format_status);
+    }
     if (service->status)
         cJSON_AddItemToObject(status, "wifi", cJSON_Duplicate(service->status, 1));
     if (service->dps)
@@ -1090,6 +1098,7 @@ int app_ipcam_Wifi_Service(void)
                         close(service.sdio.descriptor);
                         service.sdio.descriptor = -1;
                         bf_wifi_reset(service.link);
+                        app_ipcam_Storage_ReportReset();
                         service.http_pending = 0;
                         service.http_retry_after = 0;
                         retry_after = now + 3000;
@@ -1101,6 +1110,7 @@ int app_ipcam_Wifi_Service(void)
             if (poll(&control, 1, 50) > 0 && control.revents & POLLIN)
                 serve_control(&service, listener);
         }
+        app_ipcam_Storage_FormatStop();
         app_upload_stop();
     }
     if (service.sdio.descriptor >= 0)

@@ -32,6 +32,7 @@ struct bf_wifi_link {
     cJSON *http;
     cJSON *next_http;
     cJSON *busy_http;
+    cJSON *reported;
     cJSON *queue[WIFI_QUEUE];
     struct wifi_cache cache[WIFI_CACHE];
     struct wifi_parts parts;
@@ -48,6 +49,8 @@ struct bf_wifi_link {
     unsigned int peer_id;
     unsigned int highest_peer_id;
     unsigned int full_report_id;
+    unsigned int storage_report_id;
+    uint64_t storage_report_after;
     unsigned int attempts;
     uint64_t sent_at;
     char peer[BF_WIFI_RECEIVE_MAX + 1];
@@ -190,6 +193,7 @@ static void clear_outgoing(struct bf_wifi_link *link)
     link->attempts = 0;
     link->pending[0] = '\0';
     link->full_report_id = 0;
+    link->storage_report_id = 0;
     cJSON_Delete(link->busy_http);
     link->busy_http = NULL;
 }
@@ -221,6 +225,9 @@ void bf_wifi_reset(struct bf_wifi_link *link)
     link->full_applied = 0;
     link->report_needed = 0;
     link->report_ready = 0;
+    cJSON_Delete(link->reported);
+    link->reported = NULL;
+    link->storage_report_after = 0;
     link->version[0] = '\0';
 }
 
@@ -314,6 +321,9 @@ static int apply_set(struct bf_wifi_link *link, const cJSON *request, int *full)
                 link->http = NULL;
                 link->full_applied = 1;
                 link->report_ready = 0;
+                cJSON_Delete(link->reported);
+                link->reported = NULL;
+                link->storage_report_after = 0;
             }
         }
         cJSON_Delete(snapshot);
@@ -686,6 +696,75 @@ static int queue_report(struct bf_wifi_link *link)
     return error;
 }
 
+static void changed_report(struct bf_wifi_link *link, uint64_t monotonic)
+{
+    if (!link->report_ready || !link->reported || link->storage_report_id ||
+        monotonic < link->storage_report_after || !link->ops.snapshot)
+        return;
+    link->storage_report_after = monotonic + 500;
+    cJSON *current = NULL;
+    if (link->ops.snapshot(link->context, "report", &current) || !report_valid(current)) {
+        cJSON_Delete(current);
+        return;
+    }
+    cJSON *changes = cJSON_CreateObject();
+    const cJSON *field;
+    int error = changes ? 0 : ENOMEM;
+    const cJSON *format = item(current, "memory_format_status");
+    int failed = equals(format, "fail") && !cJSON_Compare(format, item(link->reported, "memory_format_status"), 1);
+    cJSON_ArrayForEach(field, current) {
+        int required = failed && (!strcmp(field->string, "memory_capacity") || !strcmp(field->string, "memory_status"));
+        if (!error && (required || !cJSON_Compare(field, item(link->reported, field->string), 1)) &&
+            !cJSON_AddItemToObject(changes, field->string, cJSON_Duplicate(field, 1)))
+            error = ENOMEM;
+    }
+    if (!error && changes->child) {
+        cJSON *request = cJSON_CreateObject();
+        if (request && cJSON_AddStringToObject(request, "cmd", "report") &&
+            cJSON_AddItemToObject(request, "properties", changes)) {
+            changes = NULL;
+            if (!bf_wifi_enqueue(link, request)) {
+                unsigned int tail = (link->head + link->count - 1) % WIFI_QUEUE;
+                link->storage_report_id = item(link->queue[tail], "id")->valueint;
+            }
+        }
+        cJSON_Delete(request);
+    }
+    cJSON_Delete(changes);
+    cJSON_Delete(current);
+}
+
+static void report_completed(struct bf_wifi_link *link, const cJSON *request, int accepted)
+{
+    if (!equals(item(request, "cmd"), "report"))
+        return;
+    unsigned int identifier = item(request, "id")->valueint;
+    if (identifier == link->storage_report_id)
+        link->storage_report_id = 0;
+    if (identifier == link->full_report_id) {
+        link->report_ready = accepted == 0;
+        link->report_needed = accepted != 0;
+        link->full_report_id = 0;
+    }
+    if (accepted) {
+        link->storage_report_after = link->sent_at + WIFI_RETRY_MS;
+        return;
+    }
+    cJSON *updated = link->reported ? cJSON_Duplicate(link->reported, 1) : cJSON_CreateObject();
+    if (!updated)
+        return;
+    const cJSON *field;
+    cJSON_ArrayForEach(field, item(request, "properties")) {
+        cJSON_DeleteItemFromObjectCaseSensitive(updated, field->string);
+        if (!cJSON_AddItemToObject(updated, field->string, cJSON_Duplicate(field, 1))) {
+            cJSON_Delete(updated);
+            return;
+        }
+    }
+    cJSON_Delete(link->reported);
+    link->reported = updated;
+}
+
 static int send_request(struct bf_wifi_link *link, uint64_t monotonic, uint64_t realtime)
 {
     if (!link->count)
@@ -694,8 +773,7 @@ static int send_request(struct bf_wifi_link *link, uint64_t monotonic, uint64_t 
         return 0;
     if (link->attempts == 3) {
         cJSON *expired = link->queue[link->head];
-        if (link->full_report_id == (unsigned int)item(expired, "id")->valueint)
-            link->full_report_id = 0;
+        report_completed(link, expired, -1);
         if (link->ops.completed)
             link->ops.completed(link->context, expired, NULL);
         cJSON_Delete(expired);
@@ -753,10 +831,7 @@ static int send_request(struct bf_wifi_link *link, uint64_t monotonic, uint64_t 
         cJSON_Delete(link->busy_http);
         link->busy_http = retry;
     }
-    if (link->full_report_id == (unsigned int)item(request, "id")->valueint) {
-        link->report_ready = accepted == 0;
-        link->full_report_id = 0;
-    }
+    report_completed(link, request, accepted);
     if (link->ops.completed)
         link->ops.completed(link->context, request, ack);
     cJSON_Delete(ack);
@@ -792,11 +867,12 @@ int bf_wifi_step(struct bf_wifi_link *link, uint64_t monotonic, uint64_t realtim
         return error;
     if (link->parts.count)
         return 0;
-    if (link->report_needed) {
+    if (link->report_needed && monotonic >= link->storage_report_after) {
         error = queue_report(link);
         if (error)
             return error;
     }
+    changed_report(link, monotonic);
     return send_request(link, monotonic, realtime);
 }
 
